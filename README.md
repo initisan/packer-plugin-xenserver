@@ -27,7 +27,7 @@ The packer builder can be installed via `packer init` as long as the packer temp
 packer {
   required_plugins {
    xenserver= {
-      version = ">= 0.9.1"
+      version = ">= 1.0.0"
       source = "github.com/xenserver/xenserver"
     }
   }
@@ -45,8 +45,8 @@ If you cannot use `packer init`, download the archive for your platform from the
 install it by hand:
 
 ```shell
-$ unzip packer-plugin-xenserver_v0.9.1_x5.0_linux_amd64.zip
-$ packer plugins install --path packer-plugin-xenserver_v0.9.1_x5.0_linux_amd64 \
+$ unzip packer-plugin-xenserver_v1.0.0_x5.0_linux_amd64.zip
+$ packer plugins install --path packer-plugin-xenserver_v1.0.0_x5.0_linux_amd64 \
     github.com/xenserver/xenserver
 $ packer plugins installed
 ```

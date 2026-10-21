@@ -1,0 +1,55 @@
+# Build check for the public repository.
+#
+# This repository is a release mirror: every commit on `main` arrives as a
+# hand-copied snapshot of an internal source tree, not as a reviewed pull
+# request. A copy that silently drops a file or lands a path in the wrong place
+# has nothing else to catch it -- and the release published from that same
+# commit is built internally, so a broken tree here would not surface until
+# someone tried to build from the published source.
+#
+# This workflow is that check. It runs on the mirror push, before the release is
+# drafted, and it only has to answer one question: does the tree that just
+# landed still compile?
+#
+# The unit tests are not repeated here. They need no XenServer host: the XAPI
+# calls they make are answered by a stub JSON-RPC server the tests start
+# themselves (builder/xenserver/common/xapi_fake_test.go). The internal
+# repository's CI already runs them on the tree this mirror is copied from, so
+# what is unproven here is the copy, not the code.
+name: build
+on:
+  push:
+    branches:
+      - 'main'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Set up XenServer Go SDK
+        uses: ./.github/actions/setup-xenserver-sdk
+        with:
+          # Unset here, which resolves the latest xapi-project/xen-api release.
+          # Set the repository variable to pin the build to a known SDK zip.
+          sdk-url: ${{ vars.XENSERVER_SDK_URL }}
+      - name: Build
+        run: go build ./...
+      - name: Type-check the tests
+        # `go build` skips _test.go, a quarter of the tree; vet compiles it, so a
+        # test file that arrived truncated, or in the wrong package directory,
+        # fails the check instead of passing it.
+        run: go vet ./...

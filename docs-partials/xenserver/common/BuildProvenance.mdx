@@ -7,7 +7,7 @@ way to turn it off:
 | Key | Value | Meaning |
 | --- | --- | --- |
 | `xs_packer_plugin` | `true` | the object was created by the XenServer Packer plugin, or cloned from one that was |
-| `xs_packer_plugin_version` | e.g. `0.9.1` | the plugin release that produced it |
+| `xs_packer_plugin_version` | e.g. `1.0.0` | the plugin release that produced it |
 
 This gives operators a queryable marker for plugin-built images. `xe vm-list` matches
 `is-a-template=false` by default, so use `xe template-list` with the same filter to find the

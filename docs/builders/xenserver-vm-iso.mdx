@@ -41,10 +41,12 @@ the install finishes.
 
 ```hcl
 packer {
+  required_version = ">= 1.7.0"
+
   required_plugins {
     xenserver = {
       source  = "github.com/xenserver/xenserver"
-      version = ">= 0.9.1"
+      version = ">= 1.0.0"
     }
   }
 }
@@ -133,10 +135,12 @@ delivers `Autounattend.xml` on an EFI-safe CD via `cd_files`, and connects over 
 
 ```hcl
 packer {
+  required_version = ">= 1.7.0"
+
   required_plugins {
     xenserver = {
       source  = "github.com/xenserver/xenserver"
-      version = ">= 0.9.1"
+      version = ">= 1.0.0"
     }
   }
 }

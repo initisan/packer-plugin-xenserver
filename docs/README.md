@@ -14,7 +14,7 @@ then run [`packer init`](/packer/docs/commands/init).
 packer {
   required_plugins {
     xenserver = {
-      version = ">= 0.9.1"
+      version = ">= 1.0.0"
       source  = "github.com/xenserver/xenserver"
     }
   }

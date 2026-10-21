@@ -1,0 +1,100 @@
+# Notifies the HashiCorp integration registry that a new plugin version exists.
+# This is the last step of a release, dispatched by hand once the GitHub Release
+# for that version has been published in this repository.
+#
+# It can only run here. The action uses the supplied token to check that the
+# notification comes from the repository registered for the integration --
+# "packer/xenserver/xenserver", which is github.com/xenserver/packer-plugin-xenserver
+# -- so dispatching it from the internal source repository would be rejected. The
+# action also validates .web-docs/metadata.hcl from the checked-out tree before it
+# posts the version and commit to the registry.
+#
+# Order matters. Mirror the source and push it, publish the release with its
+# assets attached, and only then dispatch this. The registry has no way to
+# retract a version once it has been notified, so there is no undo for a wrong
+# version number.
+name: Notify Integration Release (Manual)
+on:
+  workflow_dispatch:
+    inputs:
+      # One input, required, no default. Everything else is derived from it, so
+      # there is no way to notify one version while checking out another, and
+      # nothing here can be dispatched by accident.
+      version:
+        description: "Release version, with or without a leading v, e.g. v0.9.2. The matching tag must already exist here."
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  notify-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release version and tag
+        id: version
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          value="${RAW_VERSION#v}"
+          # Plain X.Y.Z only; this also rules out the -dev and -test prereleases
+          # used for snapshot builds.
+          if [[ ! "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a release version like v0.9.2, got '${RAW_VERSION}'." >&2
+            exit 1
+          fi
+          echo "value=${value}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${value}" >> "${GITHUB_OUTPUT}"
+      - name: Checkout the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Fails the run if the tag does not exist yet, which is the correct
+          # answer: the release has to be published before the registry is told.
+          ref: ${{ steps.version.outputs.tag }}
+      - name: Resolve the release commit
+        id: commit
+        # The action passes release_sha straight through to the registry API as
+        # `sha` without resolving or validating it, so send the real commit, not a
+        # ref name.
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+      # Ensure that Docs are Compiled
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Set up XenServer Go SDK
+        uses: ./.github/actions/setup-xenserver-sdk
+        with:
+          sdk-url: ${{ vars.XENSERVER_SDK_URL }}
+      - name: Put the Go tool bin directory on PATH
+        run: |
+          # `make generate` installs packer-sdc with `go install` and then runs it
+          # from PATH.
+          mkdir -p "$(go env GOPATH)/bin"
+          echo "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+      - name: Generate docs
+        run: make generate
+      - name: Check that generated docs are committed
+        run: |
+          if [[ -z "$(git status -s)" ]]; then
+            echo "OK"
+          else
+            echo "Docs have been updated, but the compiled docs have not been committed."
+            echo "Run 'make generate', and commit the result to resolve this error."
+            git status -s
+            exit 1
+          fi
+      - name: Notify Release
+        # Pinned by commit because this action publishes no release tags, only
+        # branches; a bare @main would hand the release notification to someone
+        # else's moving target.
+        uses: hashicorp/integration-release-action@5c982331bf102b6d9ffae6f820eb9ffda93cd7ea
+        with:
+          integration_identifier: "packer/xenserver/xenserver"
+          release_version: ${{ steps.version.outputs.value }}
+          release_sha: ${{ steps.commit.outputs.sha }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

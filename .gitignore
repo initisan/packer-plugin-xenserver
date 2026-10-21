@@ -7,10 +7,27 @@ packer_cache/*
 builder-*
 dist/*
 vendor/*
-packer-plugin-xenserver
+# The built plugin binary at the top of this directory. Windows `go build`
+# writes the .exe form, which the bare name does not match.
+/packer-plugin-xenserver
+/packer-plugin-xenserver.exe
+
+# Exported images (output_directory defaults to output-<build_name>) and the
+# docs bundle left behind by `make ci-release-docs`.
+output-*/
+docs.zip
+.docs/
+
+# The three Linux examples pin output_directory rather than taking that default.
+packer-centos8-local/
+packer-centos8-netinstall/
+packer-ubuntu-2004-iso/
+
+# Filled-in variable files carry pool credentials; only the .example ships.
+*.pkrvars.hcl
 
 # VSCode
 .vscode/
 
-# SDK folder
+# XenAPI Go SDK, fetched out of band (see README); go.mod has `replace xenapi => ./goSDK`.
 goSDK
