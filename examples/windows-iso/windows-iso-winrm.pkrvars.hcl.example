@@ -1,0 +1,43 @@
+# Example variables for windows-iso-winrm.pkr.hcl
+# Copy to windows-iso-winrm.pkrvars.hcl and fill in — DO NOT commit real secrets.
+# Packer only auto-loads var files named *.auto.pkrvars.hcl, so either name the copy
+# windows-iso-winrm.auto.pkrvars.hcl or pass it explicitly:
+#   packer build -var-file=examples/windows-iso/windows-iso-winrm.pkrvars.hcl \
+#     examples/windows-iso/windows-iso-winrm.pkr.hcl
+# Passwords are best supplied via environment instead:
+#   export PKR_VAR_xenserver_password='...'
+#   export PKR_VAR_winrm_password='...'
+
+# --- Connection (pool coordinator) ---
+xenserver_host     = "10.1.1.1"
+xenserver_username = "root"
+# xenserver_password  -> set via PKR_VAR_xenserver_password
+
+# --- Install media and placement ---
+iso_name             = "Win10Pro.ISO"
+iso_sr               = "SMB ISO library"
+# Empty uses the pool's default SR. A named SR is looked up by name-label and
+# must match exactly one SR on the pool.
+vm_sr                = ""
+clone_template       = "Windows 10 (64-bit)"
+virtual_network_name = "MyNetwork"
+
+# --- Hardware ---
+vm_name        = "packer-windows10"
+vm_description = "Created by Packer"
+memory_gb      = 8
+disk_size_gb   = 50
+cpu            = 4
+# These three override what the clone inherits from clone_template. To keep the
+# template's boot mode, set firmware = "" here — deleting the line leaves the
+# "uefi" default in windows-iso-winrm.pkr.hcl in force. A set value is trimmed and
+# lower-cased, so "UEFI" is fine, but it must be a mode the template can boot;
+# secure_boot = false turns Secure Boot off rather than inheriting it; vtpm = false
+# only skips adding one, so a vTPM that came with the template stays.
+firmware       = "uefi"
+secure_boot    = false
+vtpm           = false
+
+# --- Communicator ---
+winrm_username = "Administrator"
+# winrm_password  -> set via PKR_VAR_winrm_password

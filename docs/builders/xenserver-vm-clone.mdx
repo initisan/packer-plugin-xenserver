@@ -1,0 +1,698 @@
+<!--
+  Source form of this page: `@include` directives are resolved by `packer-sdc renderdocs`.
+  Shared partials (Connection, VM Tools) live under `docs-partials/xenserver/common/`;
+  communicator options come from the Packer SDK partials. The Clone / Hardware / Output
+  field descriptions are authored inline here. The generated struct-markdown partials
+  (`docs-partials/builder/xenserver/{common,clone}/*.mdx`) are committed and kept in sync
+  by `make generate`, but are not yet `@include`d. CP-313734 split the config per builder,
+  so they are now per-builder and correct to include; wiring them up in place of the
+  inline tables is the remaining docs step (design D5).
+-->
+---
+modeline: |
+  vim: set ft=pandoc:
+description: >
+  The XenServer Clone builder uses the XenAPI to clone an existing XenServer template or
+  virtual machine, provisions it, and exports the result — for example a Windows golden
+  image built over WinRM.
+page_title: XenServer Clone - Builders
+sidebar_title: Clone
+---
+
+# XenServer Clone Builder
+
+Type: `xenserver-vm-clone`
+
+Artifact BuilderId: `packer.xenserver`
+
+This builder clones a virtual machine from an existing XenServer **template** or **VM**,
+boots it, provisions it over SSH or WinRM, and exports the result (or leaves it behind as
+a template). Use it when your base image already exists on the pool — for example a
+sysprepped Windows template — and you want to layer configuration on top without
+reinstalling the operating system from an ISO. To build a template from an installation
+ISO instead, see the [`xenserver-vm-iso`](/packer/integrations/xenserver/xenserver/latest/components/builder/xenserver-vm-iso)
+builder.
+
+- XenCenter is not required; the builder talks to the pool directly through the XenAPI.
+- It uses the official XenServer Go SDK (goSDK).
+- This builder is tested against **XenServer 9**. Builds against earlier versions are
+  unsupported and may not work.
+
+## Examples
+
+The example below clones a Windows template, waits for WinRM, runs a provisioner, and
+leaves the result as a template on the pool. Credentials are supplied through variables —
+no secrets are committed to the template. A complete, runnable version lives in the
+[`examples/windows-clone-winrm`](https://github.com/xenserver/packer-plugin-xenserver/tree/master/examples/windows-clone-winrm)
+directory of the repository.
+
+```hcl
+packer {
+  required_plugins {
+    xenserver = {
+      version = ">= 0.9.1"
+      source  = "github.com/xenserver/xenserver"
+    }
+  }
+}
+
+variable "xenserver_host" {
+  type = string
+}
+
+variable "xenserver_username" {
+  type    = string
+  default = "root"
+}
+
+variable "xenserver_password" {
+  type      = string
+  sensitive = true
+}
+
+variable "winrm_username" {
+  type    = string
+  default = "Administrator"
+}
+
+variable "winrm_password" {
+  type      = string
+  sensitive = true
+}
+
+source "xenserver-vm-clone" "windows" {
+  # Connection to the pool coordinator
+  xenserver_host     = var.xenserver_host
+  xenserver_username = var.xenserver_username
+  xenserver_password = var.xenserver_password
+
+  # Verify the pool certificate in production: drop this and set
+  # ca_cert_path to the pool's PEM instead.
+  insecure = true
+
+  # Source and networks: this snippet leaves vm_sr out, so the clone's disks stay
+  # on the source's SR and nothing is copied in full.
+  clone_template = "Windows 11 (64-bit) golden"
+  network_names  = ["Pool-wide network associated with eth0"]
+
+  # Hardware
+  vm_name      = "packer-win11-golden"
+  vm_memory_gb = 8
+  vcpus        = 4
+  firmware     = "uefi"
+
+  # Communicator: WinRM
+  communicator   = "winrm"
+  winrm_username = var.winrm_username
+  winrm_password = var.winrm_password
+  winrm_use_ssl  = true
+  winrm_insecure = true
+  winrm_timeout  = "30m"
+
+  # Output and retention: format = "none" leaves a template behind instead of
+  # exporting a file; keep it on success
+  format  = "none"
+  keep_vm = "on_success"
+}
+
+build {
+  sources = ["source.xenserver-vm-clone.windows"]
+
+  provisioner "powershell" {
+    inline = [
+      "Write-Host 'Provisioning the golden image...'",
+      # Stand-in for your real provisioning. If you replace it with Windows Update
+      # work, note that `Get-WindowsUpdate` is not built in — it needs the
+      # PSWindowsUpdate module installed first.
+      "Get-Service -Name WinRM | Format-List Name, Status"
+    ]
+  }
+}
+```
+
+## Configuration Reference
+
+Configuration options are grouped below. Most options are optional and fall back to the
+value inherited from the source; the only always-required options are exactly one of
+`clone_template` or `clone_vm`, together with the [connection](#connection) settings.
+
+### Connection
+
+**Required:** `xenserver_host`, `xenserver_username` and `xenserver_password`, plus
+`ca_cert_path` unless `insecure` is set to `true`. Each of these may be supplied through
+the matching `XENSERVER_*` environment variable instead of the template.
+
+@include 'xenserver/common/ConnectConfig.mdx'
+
+### Host SSH access
+
+@include 'xenserver/common/HostSSHAccess.mdx'
+
+### Clone Configuration
+
+**Required — exactly one of:**
+
+- `clone_template` (string) - The name label of the source template to clone. The name
+  must resolve to exactly one template on the pool. A snapshot does not count as one:
+  XAPI stores a snapshot as a template, but `clone_vm` is the option that takes it.
+
+- `clone_vm` (string) - The name label of the source VM to clone. The name must resolve
+  to exactly one VM on the pool. A snapshot counts as one.
+
+  The VM must be halted: `VM.clone` and `VM.copy` take a halted VM only and raise
+  `VM_BAD_POWER_STATE` on anything else, suspended included — a suspended source is
+  accepted solely on a pool whose `other_config` sets `allow_clone_suspended_vm`, and
+  there the clone arrives suspended, which the build cannot start. To build from a VM
+  that has to keep running, snapshot it and name the snapshot here instead — a snapshot
+  clones while the VM keeps running, at the cost of an image only crash-consistent as of
+  the snapshot.
+
+  A snapshot named here may be a checkpoint, which is suspended rather than halted. That
+  is allowed, because `VM.clone` halts the clone itself — but not together with `vm_sr`
+  pointing at an SR the snapshot is not already on, which makes the build copy instead of
+  clone. XAPI cannot settle the copy's power state (the copy inherits `is_a_template`, so
+  its own `hard_shutdown` comes back as `VM_IS_TEMPLATE`), so the build refuses that
+  combination up front rather than after copying every disk.
+
+  A template and a VM may share a name label, which is what one option taking either kind
+  could not express: cloning a golden template and keeping its name is the ordinary way to
+  arrive at a source VM. Which option is set says which kind the name means, so the build
+  fails before it clones if the name resolves to the other one.
+
+**Optional — placement:**
+
+- `vm_sr` (string) - The name label of the storage repository (SR) for the VM's disks.
+  Left unset, the clone's disks stay on the SR the source's are on, and anything the
+  build uploads goes to the pool's default SR. Pointing it at an SR the source's disks
+  are not already on makes the build copy them in full rather than clone them
+  copy-on-write — `VM.clone` takes no SR and `VM.copy` does — so expect that build to
+  take as long as writing that much data. A source whose disks are spread across several
+  SRs is gathered onto this one. It also decides where the CD built from `cd_files` is
+  uploaded, so it has to be a writable SR.
+
+- `network_names` (array of strings) - Network name labels to attach to the VM. The first
+  entry becomes the VM's first virtual interface (VIF), the second the second VIF, and so
+  on. Setting it **replaces** the source's networking rather than adding to it: the VIFs
+  the clone inherited are destroyed first, so the list is the VM's complete set of NICs, on
+  devices `0..n-1` in the order written. Each name must match exactly one network on the
+  pool or the build fails; a label of the form `Network N` that matches nothing is looked
+  up again as `Pool-wide network associated with ethN`, so either name of a pool-wide
+  network works. If omitted, the VIFs the source supplied are kept as they are — and if
+  it supplied none, the VM gets a single VIF on the pool's management network so the guest
+  can still reach Packer's HTTP server. An explicit empty list is rejected, as is an
+  entry that names no network: omit the option instead.
+
+**Optional — hardware:**
+
+- `vm_name` (string) - Name of the new virtual machine. Defaults to
+  `packer-BUILDNAME-TIMESTAMP`, where TIMESTAMP is the time the build started, in Unix
+  epoch seconds. The plugin substitutes both parts itself, so neither the VM's
+  name-label nor the exported file name ever carries a literal `{{timestamp}}`.
+
+- `vm_description` (string) - Description of the new virtual machine. Defaults to the
+  empty string.
+
+- `vm_memory_gb` (integer) - Memory for the VM, in gibibytes: the value is multiplied by
+  1024³, so `8` gives the VM 8 GiB rather than 8 GB. It is written to all four of the VM's
+  memory limits — static and dynamic, minimum and maximum — so the guest gets a fixed
+  allocation with no ballooning range. Defaults to the source's value.
+
+- `vcpus` (integer) - Number of virtual CPUs. Defaults to the source's value.
+
+- `cores_per_socket` (integer) - Number of cores per socket. It is applied **only when
+  `vcpus` is set as well**; on its own it is ignored, with a warning, and the clone keeps
+  the source's topology. When both are set, the pair has to produce a usable socket count
+  on the two counts XenCenter refuses one, or the build fails to validate: it must divide
+  `vcpus` exactly, and the sockets it gives must not exceed 16, the limit Xen imposes.
+  Defaults to the source's value — and when `vcpus` is set on its own, the source's value
+  is kept only while it still fits the new count. Otherwise the clone gets the fewest cores
+  per socket that does fit instead — `1` up to 16 vCPUs, `2` at 32, and the whole count on
+  one socket when nothing smaller divides it — and says so:
+  XenServer refuses to start a VM whose vCPU count its cores-per-socket does not divide, so
+  the inherited topology would otherwise fail the build at `VM.start`.
+
+- `disk_size_gb` (integer) - Size of the primary disk, in GiB (1 GiB = 1024³ bytes). The
+  disk is grown to this size; shrinking is not supported, so a value below the source's
+  own disk size **fails the build** rather than producing an image at the wrong
+  size, with `disk_size_gb is N GB, but the source's primary disk is already M GB, and a
+  disk can only be grown, never shrunk. Remove disk_size_gb to keep the source's size, or
+  set it to P or more.` The two sizes in it are printed in the same 1024³-byte units the
+  option is written in — labelled `GB`, and to two decimal places when the source's disk is
+  not a whole number of them — and `P` is that size rounded up to a whole GB, because
+  `disk_size_gb` takes whole numbers only. That check reads the disk over a XenAPI session
+  once the clone exists, so it fails a running build; `packer validate` does not catch it.
+  Only the disk on device 0 is touched — a template's data disks keep their sizes, and a
+  source with no disk on device 0 fails the build too, with `disk_size_gb is set, but the
+  source has no disk on device 0 to size`. That one is checked against the source itself,
+  before the output directory is prepared and the VM cloned, since this builder can only
+  grow a disk the source already has. Only the virtual disk is resized: the partition
+  table and filesystem inside the guest are left as they were, so grow them from a
+  provisioner if the extra space has to be usable. Defaults to the source's disk
+  size.
+
+> `vm_name = ""`, `vcpus = 0`, `cores_per_socket = 0`, `vm_memory_gb = 0` and
+> `disk_size_gb = 0` are rejected at validation time, not read as "unset" and replaced by
+> the source's value. Omit the option to keep what the source has.
+
+- `firmware` (string) - VM firmware, `bios` or `uefi`. Defaults to the source's
+  value — the builder only writes this boot parameter when you set it. The value is trimmed
+  and lower-cased first, so `UEFI` and ` uefi ` both mean `uefi`, and both satisfy the
+  `secure_boot = true` and `vtpm = true` checks below. Anything that is not `bios` or `uefi`
+  after that is refused at validate time with `firmware must be one of 'bios', 'uefi', got
+  '<value>'`, rather than reaching `VM.start` and failing there. A value that is only
+  whitespace is rejected too: empty means "keep the source's", and `" "` is not empty.
+
+  `bios` **fails the build before anything is created** when the source is a UEFI one that
+  XenCenter would not let you switch either: one that has been started before, or a template
+  carrying a vTPM (`platform:vtpm = true`). A source that has run has its disk partitioned
+  and its boot files written for UEFI, and a BIOS VM has nothing it can boot; a vTPM source
+  is built for a guest that requires TPM 2.0, which XenServer offers to UEFI guests only.
+  Remove `firmware` to keep the source's own value, or clone from a source that boots BIOS.
+
+  `vtpm = false` is the way round the second one: it takes both the inherited vTPM object
+  and `platform:vtpm` off the clone, so the check lets the pair through and the VM XenServer
+  is asked to start has no vTPM for it to refuse. It does nothing for the first one — a disk
+  laid out for UEFI stays that way. A vTPM the clone inherits without the build saying
+  anything about it is caught later instead, just before the VM is started, where XenServer
+  would refuse it with `NOT_IMPLEMENTED [Booting BIOS VM with VTPMs attached]`.
+
+  Neither check runs on a build that never starts the guest (see `communicator`), because
+  such a build never applies `firmware` to the clone in the first place. On that path the
+  option is inert: the image boots the way the source did, whatever `firmware` said. That
+  matters most with `vtpm = true`, which is only accepted alongside `firmware = "uefi"` —
+  see `vtpm` below.
+
+- `secure_boot` (boolean) - Ask for UEFI Secure Boot. **Omit it to keep the source's
+  setting**; set it to `false` to turn Secure Boot off explicitly. `true`
+  requires `firmware = "uefi"`, which must be set explicitly on a clone — asking for
+  Secure Boot without it is a validation error, because the builder cannot tell whether
+  the source is UEFI.
+
+  `true` is a request, not a switch: the builder writes XenServer's `auto`, and the build log
+  says `Set Secure boot to Auto`. XAPI resolves that when the VM starts, enforcing Secure Boot
+  only on a pool that holds the UEFI certificates to enforce it with. A build on a pool with
+  none of them still succeeds, and the image it produces boots with Secure Boot off — check
+  the VM if you need it guaranteed. `false` writes Secure Boot off outright.
+
+- `vtpm` (boolean) - Attach a virtual TPM. **Omit it to keep whatever the source
+  has**; a clone inherits the source's vTPM and gets none when the source has none. `true`
+  attaches one when the source had none, and requires `firmware = "uefi"`, which must be
+  set explicitly on a clone — XenServer does not check the firmware when the vTPM is
+  created, it refuses to boot the VM afterwards, so the builder rejects the pair up front.
+  `false` destroys a vTPM the clone inherited. **`false` cannot be undone**: destroying a
+  vTPM deletes the secret behind it, so anything sealed to it — a BitLocker key above all —
+  is unrecoverable in the image the build produces. The source keeps its own vTPM,
+  so only this build's VM is affected. `false` also removes `platform:vtpm`, the key the
+  clone copies from the source and from which XenServer would create a fresh vTPM at the
+  next start, so the VM is left without one however the source carried it.
+
+  **A build that never starts the guest never applies `firmware`** (see `communicator`),
+  and the rule above is a check on the configuration rather than on the VM that comes out.
+  So `vtpm = true` with `firmware = "uefi"` over a source that boots BIOS gets through
+  validation, attaches the vTPM and finishes, leaving an image that carries a vTPM on the
+  source's own boot mode — which XenServer refuses to start: `NOT_IMPLEMENTED [Booting
+  BIOS VM with VTPMs attached]`. Give the build a reason to start the guest — `cd_files`,
+  `boot_command` or a communicator — or clone a source that already boots UEFI.
+
+- `has_vendor_device` (boolean) - Give the VM the emulated PCI device through which Windows
+  offers the XenServer PV drivers on Windows Update. A Windows guest needs the device for a
+  clean shutdown, reboot and suspend, and a Linux guest ignores it. Left unset, the clone
+  keeps whatever the source has, the same way `firmware`, `secure_boot` and `vtpm`
+  do — note this differs from the `xenserver-vm-iso` builder, which defaults it to `true`
+  because it builds onto an empty install template. **Setting it at all on a source that
+  already has Windows installed is likely to stop the guest booting**, which is what
+  XenServer's API documentation warns about; the builder writes the flag only when the
+  source has it the other way round, and says so when it does.
+
+- `vgpu_profile` (string) - vGPU profile for accelerated graphics. It is matched as a
+  case-insensitive substring of the pool's vGPU type model names — `t4-2q` selects
+  `GRID T4-2Q` — and the first type that matches wins, so give enough of the name to be
+  unambiguous. The value is not checked at validate time: a name that matches no type, or one
+  whose type no GPU group has enabled, stops the build after the VM has been cloned. Exactly
+  one vGPU is attached, on device 0. Defaults to none.
+
+- `vm_other_config` (map of string→string) - Key/value pairs written to the VM's XAPI
+  `other-config` once the clone exists. They are merged into the `other-config` the clone
+  inherited from the source rather than replacing it, so an inherited key survives unless
+  your map names it. The two build-provenance keys are written last and win over an entry
+  of the same name — see [Build Provenance](#build-provenance). Nothing checks the keys or
+  the values. Defaults to empty.
+
+**Optional — removable media:**
+
+- `cd_files` (array of strings) - Files placed on a CD-ROM attached to the VM. Each
+  entry is a literal path: a file lands in the CD root, a directory is copied onto the
+  CD under its own name. Wildcards are **not** expanded, and an entry that does not
+  exist on disk is rejected before the build starts with
+  `cd_files: '<path>' does not exist`.
+  The ISO is built on the machine running Packer, which therefore needs one of
+  `xorriso`, `mkisofs`, `hdiutil` or `oscdimg` on its `PATH`; nothing probes for those
+  binaries at validate time, so a machine that has none of them fails part-way through the
+  build, when the CD is created. The disc's volume label is fixed at `cddata` — there is no
+  `cd_label` option, so cloud-init's NoCloud datasource, which looks for a `cidata` label,
+  will not find the disc by label. Useful for unattended installs and for staging the VM
+  Tools installer. The CD is uploaded to
+  `vm_sr`, or to the pool default when that is unset, as a VDI named `Packer-cd-disk`. That
+  VDI is destroyed only when the VM is, so a build that keeps its VM leaves it behind on the
+  SR to be deleted by hand — see `keep_vm`.
+
+- `iso_sr` (string) - The name label of an ISO SR. Read by the `xenserver-vm-iso` builder's
+  `iso_name` lookup only, so this builder ignores it.
+
+-> **Note:** `boot_command`, `boot_wait`, and the `http_*` options are also honored by
+this builder for sources that need keystrokes typed at first boot. Refer to the
+[`xenserver-vm-iso`](/packer/integrations/xenserver/xenserver/latest/components/builder/xenserver-vm-iso) page for
+the boot command reference. The two repetition options below are shared with that builder.
+
+  `boot_wait` defaults to `5s`. Writing `0s` does not turn the wait off: an unset duration
+  and a zero one are the same value to the plugin, so both take that 5-second default. Only
+  a negative duration — `-1s` — skips the wait.
+
+  `http_bind_address` must be an IP address; a hostname is rejected at validation time with
+  `http_bind_address must be an IP address, got '<value>'`. It is also mutually exclusive
+  with `http_interface`: setting both fails with
+  `only one of http_bind_address or http_interface may be specified`.
+
+**Optional — boot command repetition:**
+
+- `boot_key_groups` (integer) - How many times to repeat the whole `boot_command` sequence.
+  Use it with `boot_key_group_interval` to catch a boot prompt that appears at an
+  unpredictable offset — the UEFI "Press any key to boot from CD" window, for example,
+  which is open for only about six seconds. Defaults to 1 (send once), and `0` means the
+  same as leaving it out. A value above 1 needs `boot_key_group_interval` with it. A
+  negative value is refused at validate time with
+  `boot_key_groups must be at least 1, got N`.
+
+  This builder's guest boots an existing VM or snapshot, not an installer CD, so the UEFI
+  default that `xenserver-vm-iso` applies does not apply here.
+
+- `boot_key_group_interval` (string) - How long to wait between successive `boot_command`
+  repetitions, for example `"1s"`. **Required when `boot_key_groups` is greater than 1**:
+  without it every repetition is sent at once and covers no more of the boot prompt than a
+  single send would, so the pair is refused at validate time. Defaults to 0.
+
+### Communicator Configuration
+
+Set `communicator` to `none` (default), `ssh`, or `winrm`. The relevant options for each
+are pulled from the Packer SDK below. The default is `none` because a template that has
+not said how to reach the guest is not asked for credentials to reach it: nothing logs
+in and no provisioner runs. A build that provisions has to name `ssh` or `winrm`
+explicitly.
+
+> **Each communicator asks only for its own credentials.** `ssh` needs an `ssh_username`,
+> `winrm` a `winrm_username` and a `winrm_password`, and `none` neither. Earlier releases
+> demanded an `ssh_username` on WinRM builds too, so templates written against them carry
+> a throwaway one; it is ignored and can be removed.
+
+With `communicator = "none"` Packer cannot watch for an address and cannot run
+provisioners. What the build does instead depends on whether anything would run inside
+the guest at all:
+
+- If `cd_files` or `boot_command` is set, the VM is started and the build waits for the
+  guest to power itself off, for up to `install_timeout`, and fails if it does not. Make
+  the guest shut itself down when its unattended work finishes.
+- With neither, **the VM is never started**. A clone comes off an already-installed
+  source, so there is no installation whose end could be waited for; nothing would log
+  in, nothing would type at the guest, and nothing would power it off again, so starting
+  it could only end when `install_timeout` expired. The clone is exported exactly as it
+  came off the source instead, which is what a source that configures nothing is
+  asking for. The build says so on the first line of its output.
+
+A source that runs something of its own at first boot and then halts is invisible to
+Packer, which cannot see inside the source's disk. Give it a visible reason to
+boot — `cd_files`, `boot_command`, or a communicator — or the clone is exported without
+it having run.
+
+#### Common
+
+**Optional:**
+
+@include 'packer-plugin-sdk/communicator/Config-not-required.mdx'
+
+#### SSH
+
+**Optional:**
+
+@include 'packer-plugin-sdk/communicator/SSH-not-required.mdx'
+
+@include 'packer-plugin-sdk/communicator/SSH-Private-Key-File-not-required.mdx'
+
+Packer connects straight to the guest's own address; there is no host-to-guest port
+forward to configure. Leave `ssh_host` unset and the builder supplies the address itself,
+from the address the running VM reports; set it and the build dials that instead, which is
+what a guest reachable only through a NAT or a jump address needs. Naming one does not
+skip the wait, though: the build still waits for the guest to report an address, because
+that wait is also how it knows the guest is up. `ssh_port` is honoured as given, and
+defaults to the SDK's `22`.
+
+#### Windows Remote Management (WinRM)
+
+**Optional:**
+
+@include 'packer-plugin-sdk/communicator/WinRM-not-required.mdx'
+
+`winrm_host` works exactly as `ssh_host` does: unset, the build uses the address the VM
+reports; set, it dials what you named. `winrm_port` is honored too — it defaults to
+`5985`, or to `5986` when `winrm_use_ssl` is set.
+
+@include 'xenserver/common/GuestCredentialsEnv.mdx'
+
+### Output and Retention
+
+**Optional:**
+
+- `format` (string) - Output format of the exported artifact. One of:
+
+  | Value            | Result                                                          |
+  | ---------------- | --------------------------------------------------------------- |
+  | `xva`            | Export a gzip-compressed XVA archive (default).                 |
+  | `xva_compressed` | Deprecated alias of `xva` (also gzip-compressed).               |
+  | `vdi_raw`        | Export every disk of the VM as a raw image: one file per disk, named `<vdi-uuid>.raw`, so a source with data disks produces several files. CDs are skipped — only VBDs of type `Disk` are exported. |
+  | `vdi_vhd`        | Export every disk as a VHD image named `<vdi-uuid>.vhd`, CDs likewise skipped. XenServer refuses a VHD export of a disk larger than `max_vhd_size`, 2040 GiB (`VDI_TOO_LARGE`). |
+  | `none`           | Export nothing and convert the finished VM into a template. That template is the output, so this format defaults `keep_vm` to `on_success` and leaves a reusable **template** on the pool instead of producing a file; naming `keep_vm = "never"` alongside it is still rejected at validation time, because the template would then be destroyed and the build would produce nothing. |
+
+  The template `none` produces carries the clone's own disks, so the builder drops the two
+  provisioning keys `VM.clone` copied off the source — `other_config:disks`, the
+  description of the blank disks to create, and `other_config:postinstall`. A source that
+  is itself a stock OS template carries both, and left in place they would describe a disk
+  to create on device 0 on a template that already has one there: `xe vm-install` fails
+  with `DEVICE_ALREADY_EXISTS`, and XenCenter's New VM wizard offers those phantom disks
+  instead of the real ones. The keys are only dropped on the output template; the VM's own
+  `vm_other_config` is left alone.
+
+  `xva` writes a single file, `output_directory/<vm_name>.xva`; `vdi_raw` and `vdi_vhd`
+  write one file per disk, as the table above describes. Every file written is checked
+  before the build is allowed to succeed: XAPI sends the `200` and the headers before it
+  starts writing the body, so a failure part-way through the transfer arrives as a
+  truncated file rather than as an error. An export that wrote no file, wrote fewer than
+  512 bytes, or — for `xva` — wrote something that is neither a gzip nor a tar archive
+  fails the build instead of being reported as a successful export. It is a sanity check
+  rather than an integrity one, though: nothing looks at the rest of the file, so a
+  transfer that failed later on can still leave a short archive that passes.
+
+- `keep_vm` (string) - When to keep the built VM on the pool: `never` (always delete),
+  `always`, or `on_success`. The default follows `format`: `on_success` when
+  `format = "none"`, and `never` otherwise. `on_success` keeps the VM unless the build was
+  cancelled or halted — it does not depend on an artifact being produced, so it is the
+  usual companion to `format = "none"` for leaving a template behind. Use `always` if you
+  also want the VM kept after a failed build, for debugging. `never` together with
+  `format = "none"` is refused at validation time, since that pair produces no output.
+
+  A kept VM does not take the `cd_files` disk with it: the build detaches that CD before
+  the export, and it destroys the CD's VDI only on the runs where it also destroys the
+  VM. Keeping the VM therefore leaves an unattached `Packer-cd-disk` VDI on the SR that
+  `xe vm-uninstall` and XenCenter's delete dialog will not reclaim with the VM. Clean it
+  up once you are finished with the kept VM or template: find it with
+  `xe vdi-list name-label=Packer-cd-disk`, then `xe vdi-destroy uuid=<uuid>`.
+
+- `create_snapshot` (boolean) - Take a snapshot of the VM after it is shut down, before it
+  is converted to a template and exported. Defaults to `false`. The snapshot is treated as something
+  you asked for, so the builder never removes it: the default `keep_vm = "never"` destroys
+  the VM and its disks but leaves the snapshot, and the disks behind it, on the pool. The
+  exported artifact is the VM itself, not the snapshot; delete snapshots you do not want
+  with `xe snapshot-uninstall`.
+
+- `snapshot_name` (string) - Name label for the snapshot created when `create_snapshot`
+  is `true`. It is not defaulted: with `create_snapshot = true` and no `snapshot_name`, the
+  snapshot is created with an empty name label. Given without `create_snapshot` it is
+  rejected, since it would take no snapshot.
+
+- `output_directory` (string) - Directory for the exported artifact. May be relative or
+  absolute. Defaults to `output-BUILDNAME`. The builder creates it if it is missing, and
+  uses an existing empty one as it stands; if it holds anything at all the build stops
+  before it starts and asks to be re-run with `packer build -force`, which deletes the
+  directory and everything in it first. A cancelled or halted build deletes the directory
+  on its way out, unless it is the one it refused to start in. `packer build -force` is
+  not scoped to this directory: it also destroys any VM or template on the pool whose
+  name-label is `vm_name`, and the disks they own.
+
+- `install_timeout` (string) - How long to wait for the guest to become ready before
+  failing. What the build waits for depends on the communicator: with `ssh` or `winrm` it
+  waits for the VM to report an address to connect to, and with `none` it waits for the
+  guest to power itself off. Defaults to `200m`.
+
+- `shutdown_command` (string) - Command run inside the guest, over the communicator, to
+  shut it down gracefully after provisioning. Omit it and the VM is shut down through the
+  XenAPI instead. It needs `ssh` or `winrm`: with `communicator = "none"` — the default —
+  there is nothing to run it over, and it is rejected at validation time. The command and
+  the wait for the VM to reach `Halted` share a single five-minute budget; if that runs
+  out the VM is powered off hard.
+
+## Installing XenServer VM Tools
+
+@include 'xenserver/common/GuestToolsConfig.mdx'
+
+## Build Provenance
+
+@include 'xenserver/common/BuildProvenance.mdx'
+
+## Troubleshooting
+
+- **The build hangs waiting for the guest.** The build waits up to `install_timeout` for
+  the cloned VM to report an address, which needs either the guest tools installed in the
+  source or a guest that fetches a file from Packer's HTTP server
+  (`http_directory` set). A source without the tools that will do neither can never
+  satisfy the wait; set `communicator = "none"`, which waits for the guest to power itself
+  off instead — or, if neither `cd_files` nor `boot_command` would run anything in the
+  guest, does not start it at all and exports the clone as-is. See Communicator
+  Configuration above.
+
+  While that `communicator = "none"` wait runs, the build reports the VM's power state and
+  how many times the guest's domain has started, every two minutes. The count rises each
+  time the guest reboots, so one that stops rising well short of `install_timeout` is worth
+  confirming on the VM's console rather than waiting the timeout out.
+
+- **`clone_template 'X' boots with UEFI and its boot mode is already settled`**, or **`… and
+  declares a vTPM`** — `clone_vm 'X'` where that is the option set. `firmware = "bios"` is
+  overriding a source that cannot boot that way, and the build stops before it clones
+  anything. Remove `firmware` to keep the source's own `uefi`, or clone from a source that
+  boots BIOS. On this builder `vtpm = false` does get round the second one, by building
+  without a vTPM at all — which destroys whatever the inherited one had sealed to it. See
+  `vtpm` above.
+
+  "Already settled" is read from `last_boot_CPU_flags`, which XenServer writes on a VM's
+  first start and never clears, and which `VM.clone`, `VM.copy` and import all carry across
+  — so a template captured from a VM that ran counts as settled even though the template
+  itself was never started. That makes `firmware` on this builder useful mainly for a source
+  that has never run; anything else is asking to boot a disk the other way round.
+
+- **`clone_template 'X' boots with BIOS and its boot mode is already settled`**, or `clone_vm
+  'X'` where that is the option set. The same rule with `firmware = "uefi"`: the source has
+  no EFI system partition, so UEFI firmware drops to the UEFI shell. Remove `firmware`, or
+  clone from a source that already boots UEFI.
+
+- **`this VM has a vTPM and will boot with firmware "bios" ... NOT_IMPLEMENTED [Booting BIOS
+  VM with VTPMs attached]`.** The vTPM case again, caught at the clone rather than at the
+  source. The pre-flight check above reads `platform:vtpm`, while XAPI refuses on the VM's
+  `VTPMs` objects, so a source carrying a vTPM object without the platform key gets past
+  the first and stops at the second. The message says where the firmware and the vTPM each
+  came from.
+
+- **The build fails against a pool member that is not the coordinator.** The builder
+  connects to whatever host `xenserver_host` names and never checks that it is the
+  coordinator, so pointing it at a supporter host fails with XAPI's own `HOST_IS_SLAVE`
+  fault, which the plugin passes through untranslated. Point `xenserver_host` at the
+  coordinator (master), and update it if the coordinator has moved after an HA failover.
+
+- **`ca_cert_path must be specified when insecure is false`.** The builder verifies the
+  pool's certificate by default. Export it with
+  `xe host-get-server-certificate host=<host-uuid> > pool-ca.pem` and point `ca_cert_path`
+  (or `XENSERVER_CA_CERT_PATH`) at it, or set `insecure = true` for a self-signed host in
+  a trusted lab.
+
+- **`certificate signed by unknown authority`.** `ca_cert_path` does not contain the
+  certificate of the host that answered. For a pool it must hold every host's certificate,
+  not only the coordinator's: an export, an upload, or the VNC console can be served by
+  whichever host the object currently lives on.
+
+- **`certificate is valid for X, not Y`.** The pool was reached by a name or address its
+  certificate does not cover. Use a name the certificate is issued for, or reissue the
+  certificate.
+
+- **`could not find a template named 'X'` / `found 2 VMs named 'X'`.** The value must match
+  exactly one object *of the kind the option names* on the pool. A template and a VM sharing
+  a name label is not a clash — `clone_template` sees only the template and `clone_vm` only
+  the VM — but two templates, or two VMs, with the same name are: rename one. Snapshots are
+  looked up alongside VMs, so a snapshot sharing a VM's name label clashes too.
+
+- **`clone_vm 'X' names a template, not a VM. Use clone_template instead`**, or the mirror
+  of it. The name resolved, but to another kind, which the message names. The two options
+  are not interchangeable: each looks up only its own kinds, which is what makes a shared
+  name label unambiguous. `clone_template` takes a template; `clone_vm` takes a VM or a
+  snapshot.
+
+- **`clone_vm 'X' is Running, and this build needs a halted source`.** `VM.clone` and
+  `VM.copy` take a halted VM only and raise `VM_BAD_POWER_STATE` on anything else. A
+  suspended source is accepted solely on a pool whose `other_config` sets
+  `allow_clone_suspended_vm`, and there the clone arrives suspended, which the build cannot
+  start. Shut the VM down, or snapshot it and name the snapshot in `clone_vm` instead — a
+  snapshot clones while the VM keeps running, at the cost of an image only crash-consistent
+  as of the snapshot, and is exempt from this check because XenServer halts its clone
+  itself. This is a build-time check, not a `packer validate` one: validation has no session
+  with the pool, so it cannot see the power state.
+
+- **`clone_vm 'X' names a suspended snapshot, and vm_sr may send this build through
+  VM.copy`.** A checkpoint is suspended, and settling a copy's power state is the one thing
+  XAPI cannot do to it: the copy inherits `is_a_template` from the snapshot, so XAPI's own
+  `hard_shutdown` on it fails with `VM_IS_TEMPLATE` — after every disk has been copied, and
+  with the half-built VM left on the pool. Leave `vm_sr` unset to clone in place, or name a
+  snapshot of a halted VM. Only a `vm_sr` naming an SR the snapshot is not already on
+  copies; one it is already on clones, and is not refused.
+
+- **`SR_BACKEND_FAILURE_78 ... VDI Creation failed`** on a `cd_files` upload. The SR the
+  CD is written to is read-only. The CD goes to `vm_sr`, or to the pool default when it is
+  unset, so point it at a writable SR — an `lvm`, `ext` or `nfs` one — rather than an ISO
+  library.
+
+- **WinRM never connects.** Confirm the source has WinRM enabled and listening
+  (HTTPS on 5986 when `winrm_use_ssl = true`), the firewall allows it, and
+  `winrm_username`/`winrm_password` are correct. `winrm_insecure = true` skips certificate
+  validation for self-signed WinRM listeners.
+
+- **`An ssh_username must be specified.` on a WinRM template.** The plugin build predates
+  CA-430886, which stopped the builder demanding an `ssh_username` from every communicator
+  but `none`. Upgrade the plugin, or keep the throwaway username in the template until you
+  can.
+
+- **`winrm_password must be specified when communicator = "winrm"`.** The WinRM communicator
+  authenticates with a username and password and nothing else, so a build without one would
+  install and only then fail to connect. Set `winrm_password`, or export
+  `XENSERVER_WINRM_PASSWORD`; the SDK option table above still lists it as optional because
+  that table comes from the SDK.
+
+- **`The shutdown command used the whole 5m0s allowed for a graceful shutdown without the
+  VM halting`.** The `shutdown_command` and the wait for the VM to reach `Halted` share one
+  five-minute budget, and it ran out. The build does not stop here: it warns
+  `WARNING: Forcing hard shutdown of the VM...`, powers the VM off hard and carries on to
+  the export, so the exported disks are crash-consistent rather than cleanly shut down.
+  Use a command that returns promptly so the halt lands inside the budget.
+
+- **Debugging a failed build.** Set `keep_vm = "always"` so the VM is left on the pool for
+  inspection. `on_success` is no help here: it keeps the VM only when the build was neither
+  cancelled nor halted, so a build that fails still has its VM deleted.
+
+## Required Privileges (RBAC)
+
+XenServer authorizes API callers through **role-based access control (RBAC)**, assigning
+each subject a role rather than individual privileges. The clone builder clones a template,
+VM or snapshot, creates and boots a VM, attaches storage and networks, snapshots, exports,
+and optionally converts the VM to a template — all VM-lifecycle and storage operations.
+
+| Role            | Suitable for this builder?                                                                 |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| Pool Admin      | Yes — full access. More than required.                                                     |
+| **Pool Operator** | **Yes — recommended.** Covers VM lifecycle, storage, and default-SR discovery.           |
+| VM Power Admin  | Yes — a superset of VM Admin: it adds VM placement, dynamic memory control and snapshots, so it covers clone/create/export and `create_snapshot`. Like VM Admin it may fail on pool-level default-SR discovery — specify `vm_sr` explicitly. |
+| VM Admin        | Usually sufficient for clone/create/export; may fail on pool-level default-SR discovery — specify `vm_sr` explicitly. |
+| VM Operator     | No — cannot create or clone VMs.                                                           |
+| Read Only       | No.                                                                                        |
+
+-> **Recommendation:** Use a dedicated service account with the **Pool Operator** role.
+Grant **Pool Admin** only if the same account must also manage certificates or other
+pool-wide administrative settings. For the full role-to-permission mapping, see the
+XenServer product documentation on RBAC roles and permissions.
+
+No host-level privilege beyond that is needed, whatever the build is configured to do:
+`boot_command` reaches the VM's console through the XenAPI, and `shutdown_command` runs
+inside the guest over the communicator. Neither logs in to dom0, so neither needs the
+privilege to enable host SSH — see [Host SSH access](#host-ssh-access).

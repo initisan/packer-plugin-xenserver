@@ -1,11 +1,14 @@
+// Copyright (c) 2026. Citrix Systems, Inc.
+
 package common
 
 import (
 	"context"
 	"fmt"
-	"time"
 	"strings"
+	"time"
 
+	"github.com/hashicorp/packer-plugin-sdk/communicator"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	"github.com/hashicorp/packer-plugin-sdk/packer"
 
@@ -21,7 +24,6 @@ type StepWaitForIP struct {
 func (self *StepWaitForIP) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packer.Ui)
 	c := state.Get("client").(*Connection)
-	config := state.Get("commonconfig").(CommonConfig)
 
 	ui.Say("Step: Wait for VM's IP to become known to us.")
 
@@ -36,55 +38,63 @@ func (self *StepWaitForIP) Run(ctx context.Context, state multistep.StateBag) mu
 	err = InterruptibleWait{
 		Timeout:           self.Timeout,
 		PredicateInterval: 5 * time.Second,
+		// Both sources are always consulted: this was `ip_getter`, whose default
+		// ("auto") already tried both. Snooping first, as it needs no PV tools.
 		Predicate: func() (result bool, err error) {
 
-			if config.IPGetter == "auto" || config.IPGetter == "http" {
-
-				// Snoop IP from HTTP fetch
-				select {
-				case ip = <-self.Chan:
-					ui.Message(fmt.Sprintf("Got IP '%s' from HTTP request", ip))
-					return true, nil
-				default:
-				}
-
+			// Snoop IP from HTTP fetch
+			select {
+			case ip = <-self.Chan:
+				ui.Message(fmt.Sprintf("Got IP '%s' from HTTP request", ip))
+				return true, nil
+			default:
 			}
 
-			if config.IPGetter == "auto" || config.IPGetter == "tools" {
-
-				// Look for PV IP
-				m, err := xenapi.VM.GetGuestMetrics(c.session, instance)
+			// Look for PV IP
+			m, err := xenapi.VM.GetGuestMetrics(c.session, instance)
+			if err != nil {
+				return false, err
+			}
+			if m != "" && m != nullRef {
+				metrics, err := xenapi.VMGuestMetrics.GetRecord(c.session, m)
 				if err != nil {
 					return false, err
 				}
-				if m != "" {
-					metrics, err := xenapi.VMGuestMetrics.GetRecord(c.session, m)
-					if err != nil {
-						return false, err
-					}
-					networks := metrics.Networks
-					var ok bool
-					if ip, ok = networks["0/ip"]; ok {
-						if ip != "" {
-							// Check if it is not a link-local address
-							if strings.HasPrefix(ip, "169.254."){
-								ui.Message(fmt.Sprintf("Got link-local IP '%s' from XenServer tools, which is not usable for SSH. Waiting for a valid IP address", ip))
-							} else {
-								ui.Message(fmt.Sprintf("Got IP '%s' from XenServer tools", ip))
-								return true, nil
-							}
+				networks := metrics.Networks
+				var ok bool
+				if ip, ok = networks["0/ip"]; ok {
+					if ip != "" {
+						if strings.HasPrefix(ip, "169.254.") {
+							ui.Message(fmt.Sprintf("Got link-local IP '%s' from XenServer tools, which is not usable for SSH. Waiting for a valid IP address", ip))
+						} else {
+							ui.Message(fmt.Sprintf("Got IP '%s' from XenServer tools", ip))
+							return true, nil
 						}
 					}
 				}
-
 			}
 
 			return false, nil
 		},
 	}.Wait(state)
-	if err != nil {
-		ui.Error(fmt.Sprintf("Could not get IP address of VM: %s", err.Error()))
-		// @todo: give advice on what went wrong (no HTTP server? no PV drivers?)
+	// Only one of the three ways the wait can end is worth the troubleshooting advice:
+	// neither a cancelled build nor a failed XAPI call failed to find an address.
+	switch err.(type) {
+	case nil:
+	case InterruptedError:
+		ui.Say("Interrupted while waiting for the VM's IP address")
+		return multistep.ActionHalt
+	case TimeoutError:
+		ui.Error(fmt.Sprintf("No IP address for the VM within %s (install_timeout)", self.Timeout))
+		ui.Error("An address reaches the build from one of two places. The guest tools report it " +
+			"through XAPI guest metrics, which needs the tools installed in the guest — leave " +
+			"has_vendor_device on so Windows can fetch them. Otherwise the guest fetches a file " +
+			"from Packer's HTTP server, which only runs when http_directory is set, and must be " +
+			"reachable from the guest. A build that does neither should set communicator = \"none\", " +
+			"which waits for the guest to power itself off instead.")
+		return multistep.ActionHalt
+	default:
+		ui.Error(fmt.Sprintf("Could not read the VM's IP address: %s", err.Error()))
 		return multistep.ActionHalt
 	}
 
@@ -99,6 +109,31 @@ func InstanceSSHIP(state multistep.StateBag) (string, error) {
 	return ip, nil
 }
 
-func InstanceSSHPort(state multistep.StateBag) (int, error) {
-	return 22, nil
+// CommHost gives StepConnect the address to dial: the one the build named with
+// ssh_host or winrm_host, or the IP discovered from the guest.
+//
+// The SDK assigns whatever this callback returns back over the configured host
+// on every attempt of the connect loop (step_connect_ssh.go:147,
+// step_connect_winrm.go:116), so a host the builder does not hand back here is
+// accepted at validate time and then never used (CA-431607).
+func CommHost(comm *communicator.Config) func(multistep.StateBag) (string, error) {
+	return func(state multistep.StateBag) (string, error) {
+		if host := comm.Host(); host != "" {
+			return host, nil
+		}
+		return InstanceSSHIP(state)
+	}
+}
+
+// ConnectStep builds the communicator step both builders register.
+//
+// No SSHPort callback, for the reason CommHost exists: the SDK writes that answer back
+// over ssh_port too, and only calls it when it is set. Unset, the port is the one the
+// build asked for, or the SDK's own default of 22.
+func ConnectStep(ssh *SSHConfig) *communicator.StepConnect {
+	return &communicator.StepConnect{
+		Config:    &ssh.Comm,
+		Host:      CommHost(&ssh.Comm),
+		SSHConfig: ssh.Comm.SSHConfigFunc(),
+	}
 }

@@ -1,3 +1,5 @@
+// Copyright (c) 2026. Citrix Systems, Inc.
+
 package common
 
 import (
@@ -9,7 +11,7 @@ import (
 
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	"github.com/hashicorp/packer-plugin-sdk/packer"
-	
+
 	"xenapi"
 )
 
@@ -27,31 +29,28 @@ func (self *StepUploadVdi) Run(ctx context.Context, state multistep.StateBag) mu
 	imagePath := self.ImagePathFunc()
 	vdiName := self.VdiNameFunc()
 	if imagePath == "" {
-		// skip if no disk image to attach
+		// both builders register this step unconditionally; no cd_files/iso_url means nothing to upload
 		return multistep.ActionContinue
 	}
 
 	ui.Say(fmt.Sprintf("Step: Upload VDI '%s'", vdiName))
 
-	// Create VDI for the image
-	srs, err := xenapi.SR.GetAll(c.session)
-	ui.Say(fmt.Sprintf("Step: Found SRs '%v'", srs))
-
-	sr, err := config.GetISOSR(c)
-
+	// The upload writes a new VDI, so it needs a writable SR: the VM SR, or the pool
+	// default. It used to go to iso_sr, normally a read-only ISO library, where
+	// VDI.create fails the build with SR_BACKEND_FAILURE_78.
+	sr, err := config.GetSR(c)
 	if err != nil {
-		ui.Error(fmt.Sprintf("Unable to get SR: %v", err))
+		ui.Error(fmt.Sprintf("Unable to find an SR to upload '%s' to: %v", vdiName, err))
 		return multistep.ActionHalt
 	}
 
-	// Open the file for reading (NB: HTTPUpload closes the file for us)
 	fh, err := os.Open(imagePath)
 	if err != nil {
 		ui.Error(fmt.Sprintf("Unable to open disk image '%s': %s", imagePath, err.Error()))
 		return multistep.ActionHalt
 	}
+	defer fh.Close()
 
-	// Get file length
 	fstat, err := fh.Stat()
 	if err != nil {
 		ui.Error(fmt.Sprintf("Unable to stat disk image '%s': %s", imagePath, err.Error()))
@@ -59,8 +58,6 @@ func (self *StepUploadVdi) Run(ctx context.Context, state multistep.StateBag) mu
 	}
 	fileLength := fstat.Size()
 
-	// Create the VDI
-	// vdi, err := sr.CreateVdi(vdiName, fileLength)
 	vdi, err := xenapi.VDI.Create(c.session, xenapi.VDIRecord{
 		NameLabel:   vdiName,
 		VirtualSize: int(fileLength),
@@ -79,6 +76,10 @@ func (self *StepUploadVdi) Run(ctx context.Context, state multistep.StateBag) mu
 
 	vdiUuid, err := xenapi.VDI.GetUUID(c.session, vdi)
 	if err != nil {
+		// Cleanup keys off the UUID, so without this the VDI is orphaned on the SR.
+		if destroyErr := xenapi.VDI.Destroy(c.session, vdi); destroyErr != nil {
+			log.Printf("Unable to destroy VDI '%s' whose UUID could not be read: %s", vdiName, destroyErr.Error())
+		}
 		ui.Error(fmt.Sprintf("Unable to get UUID of VDI '%s': %s", vdiName, err.Error()))
 		return multistep.ActionHalt
 	}
@@ -98,15 +99,10 @@ func (self *StepUploadVdi) Run(ctx context.Context, state multistep.StateBag) mu
 }
 
 func (self *StepUploadVdi) Cleanup(state multistep.StateBag) {
-	config := state.Get("commonconfig").(CommonConfig)
 	ui := state.Get("ui").(packer.Ui)
 	c := state.Get("client").(*Connection)
 
 	vdiName := self.VdiNameFunc()
-
-	if config.ShouldKeepVM(state) {
-		return
-	}
 
 	vdiUuidRaw, ok := state.GetOk(self.VdiUuidKey)
 	if !ok {
@@ -126,8 +122,21 @@ func (self *StepUploadVdi) Cleanup(state multistep.StateBag) {
 		return
 	}
 
+	// Whether the disk is still attached, not keep_vm: format = "none" defaults keep_vm to
+	// on_success, and deciding on it left every uploaded VDI on the SR with its VBD already
+	// destroyed by StepDetachVdi and nothing referencing it. A VM being kept with the media
+	// still plugged in keeps its VBD, and that is what keeps this VDI.
+	vbds, err := xenapi.VDI.GetVBDs(c.session, vdi)
+	if err != nil {
+		ui.Error(fmt.Sprintf("Can't tell whether VDI '%s' is still attached, so leaving it: %s", vdiUuid, err.Error()))
+		return
+	}
+	if len(vbds) > 0 {
+		log.Printf("Keeping VDI '%s': still attached by %d VBD(s)", vdiUuid, len(vbds))
+		return
+	}
+
 	// an interrupted import_raw_vdi takes a while to release the VDI
-	// so try several times
 	for i := 0; i < 3; i++ {
 		log.Printf("Trying to destroy VDI...")
 		err = xenapi.VDI.Destroy(c.session, vdi)

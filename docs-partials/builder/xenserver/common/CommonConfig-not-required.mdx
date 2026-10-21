@@ -1,0 +1,224 @@
+<!-- Code generated from the comments of the CommonConfig struct in builder/xenserver/common/common_config.go; DO NOT EDIT MANUALLY -->
+
+- `vm_name` (\*string) - The name of the new VM, without a file extension. Defaults to
+  `packer-{{build_name}}-{{timestamp}}`. The empty string is not a name and
+  is rejected: omit the option to get the default.
+
+- `vm_description` (string) - The description of the new VM. Defaults to the empty string.
+
+- `vm_sr` (string) - The name-label of the storage repository (SR) to use for the VM's disks.
+  Defaults to the pool's default SR.
+  
+  On the clone builder that default covers what the build uploads, not the
+  clone's own disks: left unset, they stay on the SR the source's are on,
+  because `VM.clone` cannot place them. Setting this to an SR the source's
+  disks are not already on makes the build copy every one of them in full
+  instead of cloning it copy-on-write, which is what `VM.copy` does to take
+  a target SR, so expect it to take as long as writing that much data. A
+  source whose disks are spread across SRs is gathered onto this one.
+  
+  Every VDI the build uploads — the CD built from `cd_files`, and an ISO
+  fetched from `iso_url` — is created here too, because writing a VDI needs
+  a writable SR.
+
+- `iso_sr` (string) - The name-label of the storage repository (SR) the install ISO named by
+  `iso_name` is looked up in. Nothing is ever written to it, so it can be a
+  read-only ISO library.
+
+- `cd_files` ([]string) - A list of files placed in the root of a CD-ROM attached when the VM
+  boots. Useful for unattended Windows installs (an `Autounattend.xml`).
+  Works with both BIOS and UEFI boot.
+
+- `network_names` ([]string) - A list of network name-labels to attach to the VM, in order. The first
+  entry becomes the VM's first VIF, the second the second VIF, and so on.
+  Setting it means exactly these NICs and no others, so the VIFs inherited
+  from the template are destroyed first. Left unset, the template's NICs are
+  kept, and the pool's management network is attached only when the template
+  gave the VM none. An explicit empty list is rejected, as is an entry that
+  names no network: omit the option instead.
+
+- `vcpus` (\*uint) - The number of vCPUs to assign to the VM. It sets both the VM's maximum
+  vCPU count and its vCPU count at startup. Unset, both builders keep the
+  value of the source they clone; it has no default, so the iso builder
+  requires it on the generic `Other install media` template, which has no
+  value to keep. `0` is not a vCPU count and is rejected: omit the option
+  instead.
+
+- `cores_per_socket` (\*uint) - The number of cores per socket for the VM. Both builders apply it only
+  when `vcpus` is set too, and otherwise keep the source's topology. The
+  one exception is a source topology that does not fit the `vcpus` the
+  build asked for -- it has to divide them exactly, and give no more than
+  16 sockets -- which XenServer will not run: that VM is given the fewest
+  cores per socket that does fit instead. A `cores_per_socket` the build
+  sets itself is held to the same two rules at validate time. `0` is
+  rejected: omit the option instead.
+
+- `vm_memory_gb` (\*uint) - The amount of RAM to assign to the VM, in gigabytes. Unset, both builders
+  keep the value of the source they clone; it has no default, so the iso
+  builder requires it on the generic `Other install media` template, which
+  has no value to keep. `0` is not an amount of RAM and is rejected: omit
+  the option instead.
+
+- `disk_size_gb` (\*uint) - The size of the VM's primary disk, in gigabytes. The iso builder creates
+  the disk at this size; the clone builder grows the source's disk to it.
+  It has no default. Unset, the iso builder takes the size `clone_template`
+  asks for -- its provisioning disks, or failing those the disk it carries
+  on device 0 -- and requires the option on the generic `Other install
+  media` template, which has neither; the clone builder leaves the disk
+  alone.
+  
+  It sizes only the disk on device 0, and fails if the source has none
+  there. A disk can only be grown, so a value below the source's own disk
+  size fails the build rather than producing an image at the wrong size.
+  `0` is not a disk size and is rejected: omit the option instead.
+
+- `vm_other_config` (map[string]string) - Key/value pairs written to the VM's XAPI `other-config`. The plugin writes
+  `xs_packer_plugin` and `xs_packer_plugin_version` after this map, so an
+  entry using either of those key names is silently overridden by the
+  plugin's own value.
+
+- `vgpu_profile` (string) - The vGPU profile (type) to attach for accelerated graphics.
+
+- `firmware` (string) - The VM firmware to use: `bios` or `uefi`. Defaults to the firmware of the
+  template the VM is cloned from -- both builders clone, and neither writes
+  this boot parameter unless the build sets it. A template that carries no
+  firmware at all is a BIOS VM, which is what XenServer's generic install
+  templates are.
+  
+  Setting it is an override, not a request: it wins over the source's own
+  firmware, and `VM.start` accepts the result either way. Where the source
+  cannot in fact boot that way, the build is refused before it starts rather
+  than left waiting for a guest that never comes up. That covers a source
+  whose boot mode is already settled -- one that has run under the other
+  firmware, or was cloned or imported from one that has -- and, for
+  `firmware = "bios"`, a source carrying a vTPM, which XenServer implements
+  for UEFI guests only.
+  
+  Both the refusal and the write belong to starting the VM, so a clone build
+  that never starts one -- `communicator = "none"` with no `cd_files` and no
+  `boot_command` -- neither checks the source nor writes the boot parameter,
+  and exports the clone with the firmware it inherited. Setting it is still
+  required there by `secure_boot` and `vtpm`, which are applied to the clone
+  whether or not it boots.
+
+- `secure_boot` (\*bool) - Enable UEFI Secure Boot. `true` requires `firmware = "uefi"`, which must
+  be set explicitly, and is written as XAPI's `auto` -- "on where the pool
+  has certificates to enforce it with". `VM.start` resolves that against
+  the UEFI certificates the pool actually has, so on a pool with none the
+  VM starts with Secure Boot off.
+  
+  Omit it to keep whatever the template the VM is cloned from has, which is
+  why this is a pointer: an unset option and an explicit `false` have to be
+  told apart. There is no value meaning "unset" to write, so keeping the
+  source's is done by writing nothing -- `false` is a real setting, and
+  writing it over a Secure Boot template is what turns Secure Boot off.
+
+- `has_vendor_device` (\*bool) - Give the VM the emulated PCI device through which Windows offers the
+  XenServer PV drivers on Windows Update. A Windows guest needs it for a
+  clean shutdown, reboot and suspend; a Linux guest is PV-native and does
+  not use it.
+  
+  A VM inherits the setting from whatever it was cloned from, and the plugin
+  writes the flag only when it differs from the source, because XenServer
+  warns that changing it on a VM that already has Windows installed is
+  likely to stop the guest booting. What leaving it unset means therefore
+  differs by builder. The iso builder defaults it to true: it installs the
+  guest OS itself, and the generic `Other install media` template has the
+  device off, so a Windows build left alone would come out without it. The
+  clone builder keeps the source template's setting, because that source
+  already has the OS on it.
+
+- `boot_command` ([]string) - An array of commands typed over VNC when the VM first boots, used to
+  start the OS installer. See the Boot Command section for details.
+
+- `shutdown_command` (string) - The command used to gracefully shut the VM down once provisioning is
+  complete. Defaults to a clean shutdown via the XenAPI.
+
+- `boot_wait` (duration string | ex: "1h5m2s") - The time to wait after boot before typing the `boot_command` (for example
+  `5s` or `1m30s`). Defaults to 5s.
+
+- `boot_key_groups` (int) - How many times to repeat the full `boot_command` sequence. Use this with
+  `boot_key_group_interval` to cover a boot prompt that appears at an
+  unpredictable offset — for example the UEFI "Press any key to boot from
+  CD" window, which is only open for ≈6 s.
+  
+  Defaults to 1 (send once), except on `xenserver-vm-iso` with a UEFI guest
+  and a `boot_command` of a single `<spacebar>`, where it defaults to 20
+  sends 1 s apart to cover that window. Every other command is sent once:
+  each repetition lands in whatever the first one started, so a key that
+  chooses, a typed character and a `<wait>` are all left alone.
+
+- `boot_key_group_interval` (duration string | ex: "1h5m2s") - How long to wait between successive `boot_command` repetitions, for
+  example `"1s"`. Required with a `boot_key_groups` above 1, which is
+  otherwise sent all at once and covers no more than a single send.
+  Defaults to 0, or to 1 s when `boot_key_groups` takes its UEFI iso
+  default; naming one there replaces the 1 s and keeps the 20 repetitions.
+
+- `install_timeout` (duration string | ex: "1h5m2s") - The maximum time to wait for the unattended installation to finish — on the
+  iso builder, long enough for the whole install to run. What the build waits
+  for depends on the communicator: with `ssh` or `winrm` it waits for the VM
+  to report an address to connect to, and with `none` it waits for the guest
+  to power itself off, which is the only completion signal such a build has.
+  Defaults to 200m.
+
+- `http_directory` (string) - Path to a local directory served over HTTP to the VM (kickstart,
+  preseed, or autounattend files). An empty value disables the HTTP server.
+
+- `http_bind_address` (string) - The address the HTTP server binds to, and the address the VM is told to
+  fetch from via `{{ .HTTPIP }}`. Defaults to empty, meaning every interface,
+  in which case the address advertised to the VM is derived from the route to
+  `xenserver_host`. Set this when the machine running Packer reaches the VM on
+  a different network from the one it reaches the pool on. Mutually exclusive
+  with `http_interface`.
+
+- `http_interface` (string) - The name of a local network interface whose IPv4 address the VM is told to
+  fetch from. An alternative to `http_bind_address` for naming the route to
+  the VM; mutually exclusive with it.
+
+- `output_directory` (string) - The local directory into which artifacts are exported. Defaults to
+  `output-{{build_name}}`. It is created when it does not exist, and an
+  existing empty one is used as it stands; when it holds anything at all
+  the build stops before it starts and asks to be re-run with `-force`,
+  which deletes the directory and everything in it first. A build that
+  fails or is cancelled deletes the directory on its way out, unless it is
+  the one it refused to start in. `-force` is not scoped to this directory:
+  it also destroys any VM or template on the pool whose name-label is
+  `vm_name`, and the disks they own.
+
+- `format` (string) - The output format of the exported VM: `xva`, `vdi_raw`, `vdi_vhd`, or
+  `none`. Defaults to `xva`. `xva_compressed` is still accepted as a
+  deprecated alias of `xva` — XVA exports are always compressed — and
+  warns when used. `vdi_raw` and `vdi_vhd` export each disk individually,
+  raw or as a VHD; XenServer refuses a VHD export of a disk larger than
+  2040 GiB (`VDI_TOO_LARGE`). Use `none` to export nothing and convert the
+  finished VM into a template instead. That template is the output, so
+  `none` defaults `keep_vm` to `on_success`.
+
+- `keep_vm` (string) - When to keep the build VM: `always`, `never`, or `on_success`. The default
+  follows `format`: `on_success` when `format` is `none`, because the VM is
+  then the only output, and `never` for every format that exports a file.
+
+- `create_snapshot` (bool) - Take a snapshot of the VM before finishing the build. Defaults to false.
+
+- `snapshot_name` (string) - The name for the snapshot created when `create_snapshot` is true. Setting it
+  on its own is rejected, since it would take no snapshot.
+
+- `insecure` (\*bool) - Skip verification of the XenServer TLS certificate. Defaults to false,
+  meaning the certificate is verified. Intended for non-production use only.
+  Named to match the XenServer Terraform provider, and to say plainly which
+  knob it is: it is what `tls.Config.InsecureSkipVerify` is set from.
+  
+  Falls back to the `XENSERVER_INSECURE` environment variable. This is a
+  pointer so that an unset option can be told from an explicit
+  `insecure = false`: only the former defers to the environment. Setting
+  `ca_cert_path` in the template says the same thing another way, so a build
+  that pins a certificate there reports `XENSERVER_INSECURE=true` as ignored
+  rather than quietly stopping verifying. A `ca_cert_path` that came from
+  `XENSERVER_CA_CERT_PATH` is the environment talking, not the template, so
+  `XENSERVER_INSECURE=true` still applies there.
+
+- `ca_cert_path` (string) - Path to the PEM-encoded CA certificate used to verify the XenServer TLS
+  connection. Required unless `insecure` is true. Falls back to the
+  `XENSERVER_CA_CERT_PATH` environment variable.
+
+<!-- End of code generated from the comments of the CommonConfig struct in builder/xenserver/common/common_config.go; -->

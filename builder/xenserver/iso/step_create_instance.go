@@ -1,10 +1,11 @@
+// Copyright (c) 2026. Citrix Systems, Inc.
+
 package iso
 
 import (
 	"context"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
@@ -20,40 +21,45 @@ type stepCreateInstance struct {
 	vdi      *xenapi.VDIRef
 }
 
+// keptSizing names the sizing the VM takes from clone_template, for the build log.
+// Nothing is written for an option the build left out, so the VM keeps what VM.clone
+// copied. The CPU topology is left out: ReconcileCPUTopology describes that itself,
+// because an inherited one is not always keepable.
+func keptSizing(config ISOConfig) []string {
+	var kept []string
+
+	if config.VCPUs == nil {
+		kept = append(kept, "vCPU count")
+	}
+	if config.VMMemoryGB == nil {
+		kept = append(kept, "memory")
+	}
+
+	return kept
+}
+
 func (self *stepCreateInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 
 	c := state.Get("client").(*xscommon.Connection)
-	config := state.Get("config").(xscommon.Config)
+	config := state.Get("config").(ISOConfig)
 	ui := state.Get("ui").(packer.Ui)
 
 	ui.Say("Step: Create Instance")
 
-	// Run Pre-Cleanup to check if VM not already exists
-	err := xscommon.PreCleanup(state, config.PackerForce)
+	// Resolved and vetted in Run, before the output directory was prepared and the CD
+	// uploaded: by here the pool has already been written to.
+	template := state.Get("source_vm").(xenapi.VMRef)
+
+	err := xscommon.PreCleanup(state, config.PackerForce,
+		xscommon.TemplateSource(config.CloneTemplate), template)
 	if err != nil {
 		state.Put("error", err)
 		return multistep.ActionHalt
 	}
 
-	// Get the template to clone from
-
-	vms, err := xenapi.VM.GetByNameLabel(c.GetSession(), config.CloneTemplate)
-
-	switch {
-	case len(vms) == 0:
-		ui.Error(fmt.Sprintf("Couldn't find a template with the name-label '%s'. Aborting.", config.CloneTemplate))
-		return multistep.ActionHalt
-	case len(vms) > 1:
-		ui.Error(fmt.Sprintf("Found more than one template with the name '%s'. The name must be unique. Aborting.", config.CloneTemplate))
-		return multistep.ActionHalt
-	}
-
-	template := vms[0]
-
-	// Clone that VM template
-	instance, err := xenapi.VM.Clone(c.GetSession(), template, config.VMName)
+	instance, err := xenapi.VM.Clone(c.GetSession(), template, config.Name())
 	if err != nil {
-		ui.Error(fmt.Sprintf("Error cloning VM: %s", err.Error()))
+		ui.Error(fmt.Sprintf("Error cloning '%s': %s", config.CloneTemplate, err.Error()))
 		return multistep.ActionHalt
 	}
 	self.instance = &instance
@@ -64,99 +70,92 @@ func (self *stepCreateInstance) Run(ctx context.Context, state multistep.StateBa
 		return multistep.ActionHalt
 	}
 
-	err = xenapi.VM.SetVCPUsMax(c.GetSession(), instance, int(config.VCPUsMax))
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error setting VM VCPUs Max=%d: %s", config.VCPUsMax, err.Error()))
+	// The vendor device has to be in place before the guest OS is installed: Windows
+	// only offers the PV drivers through Windows Update if it saw the emulated PCI
+	// device as it installed, and without them the guest has no clean shutdown, reboot
+	// or suspend. The generic template, "Other install media", has it off.
+	if _, err = xscommon.ApplyVendorDevice(c, instance, config.HasVendorDeviceEnabled()); err != nil {
+		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
 
-	err = xenapi.VM.SetVCPUsAtStartup(c.GetSession(), instance, int(config.VCPUsAtStartup))
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error setting VM VCPUs At Startup=%d: %s", config.VCPUsAtStartup, err.Error()))
-		return multistep.ActionHalt
+	// Sizing is written only where the build asked for it: the clone came off
+	// clone_template with the template's own vCPUs, topology and memory, and an unset
+	// option means keep them. Writing all three regardless made a template sized for
+	// the guest OS pointless (CA-431806).
+	if kept := keptSizing(config); len(kept) > 0 {
+		ui.Say(fmt.Sprintf("Keeping the %s of '%s'", strings.Join(kept, ", "), config.CloneTemplate))
 	}
 
-	memory := int(config.VMMemory * 1024 * 1024)
-	err = xenapi.VM.SetMemoryLimits(c.GetSession(), instance, memory, memory, memory, memory)
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error setting VM memory=%d: %s", memory, err.Error()))
-		return multistep.ActionHalt
-	}
-
-	// Only set Platform Args when parameter is set, otherwise we overrule the Template Args
-	if len(config.PlatformArgs) != 0 {
-		err = xenapi.VM.SetPlatform(c.GetSession(), instance, config.PlatformArgs)
+	if config.VCPUs != nil {
+		// XAPI holds VCPUs_at_startup <= VCPUs_max in both setters, so step the count
+		// inherited from clone_template out of the way before lowering the maximum: a
+		// vcpus below the template's own is otherwise refused.
+		err = xenapi.VM.SetVCPUsAtStartup(c.GetSession(), instance, 1)
 		if err != nil {
-			ui.Error(fmt.Sprintf("Error setting VM platform: %s", err.Error()))
+			ui.Error(fmt.Sprintf("Error setting VM VCPUs At Startup=1: %s", err.Error()))
+			return multistep.ActionHalt
+		}
+
+		err = xenapi.VM.SetVCPUsMax(c.GetSession(), instance, int(*config.VCPUs))
+		if err != nil {
+			ui.Error(fmt.Sprintf("Error setting VM VCPUs Max=%d: %s", *config.VCPUs, err.Error()))
+			return multistep.ActionHalt
+		}
+
+		err = xenapi.VM.SetVCPUsAtStartup(c.GetSession(), instance, int(*config.VCPUs))
+		if err != nil {
+			ui.Error(fmt.Sprintf("Error setting VM VCPUs At Startup=%d: %s", *config.VCPUs, err.Error()))
 			return multistep.ActionHalt
 		}
 	}
 
-	// Set Cores per Socket
-	coresPerSocket := config.CorePerSocket
-	vcpus := config.VCPUs
-	if vcpus%coresPerSocket != 0 {
-		ui.Error(fmt.Sprintf("%d cores could not fit to %d cores-per-socket topology", vcpus, coresPerSocket))
-		return multistep.ActionHalt
-	}
-	err = xenapi.VM.RemoveFromPlatform(c.GetSession(), instance, "cores-per-socket")
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error removing cores-per-socket from VM platform: %s", err.Error()))
-		return multistep.ActionHalt
-	}
-	err = xenapi.VM.AddToPlatform(c.GetSession(), instance, "cores-per-socket", strconv.FormatUint(uint64(coresPerSocket), 10))
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error setting cores-per-socket to %d: %s", coresPerSocket, err.Error()))
-		return multistep.ActionHalt
-	}
-
-	// Set secure boot
-	if config.SecureBoot && config.Firmware == "uefi" {
-		ui.Say("Set Secure boot to Auto")
-		err = xenapi.VM.RemoveFromPlatform(c.GetSession(), instance, "secureboot")
+	if config.VMMemoryGB != nil {
+		memory := int(*config.VMMemoryGB) * xscommon.BytesPerGB
+		err = xenapi.VM.SetMemoryLimits(c.GetSession(), instance, memory, memory, memory, memory)
 		if err != nil {
-			ui.Error(fmt.Sprintf("Error setting VM Secure Boot=%t: %s", config.SecureBoot, err.Error()))
-			return multistep.ActionHalt
-		}
-		err = xenapi.VM.AddToPlatform(c.GetSession(), instance, "secureboot", "auto")
-	} else {
-		ui.Say("Set Secure boot to Disabled")
-		err = xenapi.VM.RemoveFromPlatform(c.GetSession(), instance, "secureboot")
-		if err != nil {
-			ui.Error(fmt.Sprintf("Error setting VM Secure Boot=%t: %s", config.SecureBoot, err.Error()))
-			return multistep.ActionHalt
-		}
-		err = xenapi.VM.AddToPlatform(c.GetSession(), instance, "secureboot", "false")
-	}
-
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error setting VM Secure Boot=%t: %s", config.SecureBoot, err.Error()))
-		return multistep.ActionHalt
-	}
-
-	err = xenapi.VM.SetNameDescription(c.GetSession(), instance, config.VMDescription)
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error setting VM description: %s", err.Error()))
-		return multistep.ActionHalt
-	}
-
-	if len(config.VMOtherConfig) != 0 {
-		vm_other_config, err := xenapi.VM.GetOtherConfig(c.GetSession(), instance)
-		if err != nil {
-			ui.Error(fmt.Sprintf("Error getting VM other-config: %s", err.Error()))
-			return multistep.ActionHalt
-		}
-		for key, value := range config.VMOtherConfig {
-			vm_other_config[key] = value
-		}
-		err = xenapi.VM.SetOtherConfig(c.GetSession(), instance, vm_other_config)
-		if err != nil {
-			ui.Error(fmt.Sprintf("Error setting VM other-config: %s", err.Error()))
+			ui.Error(fmt.Sprintf("Error setting VM memory=%d: %s", memory, err.Error()))
 			return multistep.ActionHalt
 		}
 	}
 
-	// Create VDI for the instance
+	// After the vCPU count above: the topology is only valid against the VCPUs_max the VM
+	// ends up with. Prepare has already rejected a pair the build set that does not divide.
+	topology, err := xscommon.ReconcileCPUTopology(c, instance, config.VCPUs, config.CorePerSocket)
+	if err != nil {
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
+	ui.Say(topology.Describe(config.CloneTemplate))
+
+	// Only when the build said something about it: unset means "keep what
+	// clone_template has", the same as firmware. This builder used to write
+	// "false" unconditionally, which cost a Secure Boot template its Secure Boot.
+	secureBoot, err := xscommon.ReconcileSecureBoot(c, instance, config.SecureBoot)
+	if err != nil {
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
+	ui.Say(secureBoot.Describe(config.CloneTemplate))
+
+	// Unset keeps clone_template's, like the sizing above. vm_description is a plain
+	// string, so "" is the only spelling of unset it has.
+	if config.VMDescription != "" {
+		err = xenapi.VM.SetNameDescription(c.GetSession(), instance, config.VMDescription)
+		if err != nil {
+			ui.Error(fmt.Sprintf("Error setting VM description: %s", err.Error()))
+			return multistep.ActionHalt
+		}
+	}
+
+	// vm_other_config plus the build-provenance stamp (F6.1). Unconditional: the VM must
+	// be identifiable as plugin-built even with no vm_other_config set.
+	err = xscommon.StampVM(c, instance, config.VMOtherConfig)
+	if err != nil {
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
+
 	sr, err := config.GetSR(c)
 
 	if err != nil {
@@ -164,11 +163,18 @@ func (self *stepCreateInstance) Run(ctx context.Context, state multistep.StateBa
 		return multistep.ActionHalt
 	}
 
+	// Resolved in Run off the one source record, from disk_size_gb or from the template.
+	diskBytes := state.Get("disk_size_bytes").(int)
+	if config.DiskSizeGB == nil {
+		ui.Say(fmt.Sprintf("Installing onto a %s disk, the size '%s' asks for",
+			xscommon.FormatGB(diskBytes), config.CloneTemplate))
+	}
+
 	ui.Say(fmt.Sprintf("Using the following SR for the VM: %s", sr))
 
 	vdi, err := xenapi.VDI.Create(c.GetSession(), xenapi.VDIRecord{
 		NameLabel:   "Packer-disk",
-		VirtualSize: int(config.DiskSize * 1024 * 1024),
+		VirtualSize: diskBytes,
 		Type:        "user",
 		Sharable:    false,
 		ReadOnly:    false,
@@ -189,87 +195,37 @@ func (self *stepCreateInstance) Run(ctx context.Context, state multistep.StateBa
 		return multistep.ActionHalt
 	}
 
-	// Connect Network
-
-	var network xenapi.NetworkRef
-
+	// The VM came off clone_template through VM.clone, which copies the template's VIFs,
+	// so device 0 is already taken. network_names -- which means exactly these NICs -- has
+	// to destroy them first or VIF.create hits DEVICE_ALREADY_EXISTS. Unset keeps them,
+	// falling back to the management network only when there are none.
 	if len(config.NetworkNames) == 0 {
-		// No network has be specified. Use the management interface
-		log.Println("No network name given, attempting to use management interface")
-		pifs, err := xenapi.PIF.GetAll(c.GetSession())
-
+		inheritedVIFs, err := xscommon.CountVIFs(c, instance)
 		if err != nil {
-			ui.Error(fmt.Sprintf("Error getting PIFs: %s", err.Error()))
+			ui.Error(err.Error())
 			return multistep.ActionHalt
 		}
 
-		for _, pif := range pifs {
-			pif_rec, err := xenapi.PIF.GetRecord(c.GetSession(), pif)
-
-			if err != nil {
-				ui.Error(fmt.Sprintf("Error getting PIF record: %s", err.Error()))
+		if inheritedVIFs > 0 {
+			ui.Say(fmt.Sprintf("No network_names given; keeping the %d NIC(s) inherited from the template", inheritedVIFs))
+			log.Printf("Template supplied %d VIF(s); not creating a management VIF\n", inheritedVIFs)
+		} else {
+			log.Println("No network name given, attempting to use management interface")
+			if err := xscommon.AttachManagementNetwork(c, instance, ui.Say); err != nil {
+				ui.Error(err.Error())
 				return multistep.ActionHalt
 			}
-
-			if pif_rec.Management {
-				network = pif_rec.Network
-			}
-
 		}
-
-		if string(network) == "" {
-			ui.Error("Error: couldn't find management network. Aborting.")
-			return multistep.ActionHalt
-		}
-
-		log.Printf("Creating VIF on network '%s' on VM '%s'\n", network, instance)
-		_, err = xscommon.ConnectNetwork(c, network, instance, "0")
-
-		if err != nil {
-			ui.Error(fmt.Sprintf("Failed to create VIF with error: %v", err))
-			return multistep.ActionHalt
-		}
-
 	} else {
+		if err := xscommon.DetachAllVIFs(c, instance, ui.Say); err != nil {
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+
 		log.Printf("Using provided network names: %v\n", config.NetworkNames)
-		// Look up each network by it's name label
-		for i, networkNameLabel := range config.NetworkNames {
-			ui.Say(fmt.Sprintf("Finding network '%s'", networkNameLabel))
-			networks, err := xenapi.Network.GetByNameLabel(c.GetSession(), networkNameLabel)
-
-			if err != nil {
-				ui.Error(fmt.Sprintf("Error occured getting Network by name-label: %s", err.Error()))
-				return multistep.ActionHalt
-			}
-			// If network Name label starts with "Network ", we assume it is a default network
-			if len(networks) == 0 && strings.HasPrefix(networkNameLabel, "Network ") {
-
-				tmpNetworkNo := strings.TrimPrefix(networkNameLabel, "Network ")
-				tmpLabel := "Pool-wide network associated with eth" + tmpNetworkNo
-				ui.Say(fmt.Sprintf("No network found with name-label '%s'. This might be a default built-in network '%s'", networkNameLabel, tmpLabel))
-				networks, err = xenapi.Network.GetByNameLabel(c.GetSession(), tmpLabel)
-				if err != nil {
-					ui.Error(fmt.Sprintf("Error occured getting default Network: %s", err.Error()))
-					return multistep.ActionHalt
-				}
-			}
-
-			switch {
-			case len(networks) == 0:
-				ui.Error(fmt.Sprintf("Couldn't find a network with the specified name-label '%s'. Aborting.", networkNameLabel))
-				return multistep.ActionHalt
-			case len(networks) > 1:
-				ui.Error(fmt.Sprintf("Found more than one network with the name '%s'. The name must be unique. Aborting.", networkNameLabel))
-				return multistep.ActionHalt
-			}
-
-			//we need the VIF index string
-			vifIndexString := fmt.Sprintf("%d", i)
-			_, err = xscommon.ConnectNetwork(c, networks[0], instance, vifIndexString)
-
-			if err != nil {
-				ui.Say(fmt.Sprintf("Failed to connect VIF with error: %v", err.Error()))
-			}
+		if err := xscommon.AttachNamedNetworks(c, instance, config.NetworkNames, ui.Say); err != nil {
+			ui.Error(err.Error())
+			return multistep.ActionHalt
 		}
 	}
 
@@ -286,7 +242,7 @@ func (self *stepCreateInstance) Run(ctx context.Context, state multistep.StateBa
 }
 
 func (self *stepCreateInstance) Cleanup(state multistep.StateBag) {
-	config := state.Get("config").(xscommon.Config)
+	config := state.Get("config").(ISOConfig)
 	if config.ShouldKeepVM(state) {
 		return
 	}
@@ -294,20 +250,20 @@ func (self *stepCreateInstance) Cleanup(state multistep.StateBag) {
 	ui := state.Get("ui").(packer.Ui)
 	c := state.Get("client").(*xscommon.Connection)
 
+	// VmCleanup has already taken both away on any build that got as far as starting
+	// the VM, so a failure here is the expected HANDLE_INVALID rather than a leak.
 	if self.instance != nil {
 		ui.Say("Destroying VM")
 		_ = xenapi.VM.HardShutdown(c.GetSession(), *self.instance) // redundant, just in case
-		err := xenapi.VM.Destroy(c.GetSession(), *self.instance)
-		if err != nil {
-			ui.Error(err.Error())
+		if err := xenapi.VM.Destroy(c.GetSession(), *self.instance); err != nil {
+			log.Printf("Unable to destroy the VM: %s", err.Error())
 		}
 	}
 
 	if self.vdi != nil {
 		ui.Say("Destroying VDI")
-		err := xenapi.VDI.Destroy(c.GetSession(), *self.vdi)
-		if err != nil {
-			ui.Error(err.Error())
+		if err := xenapi.VDI.Destroy(c.GetSession(), *self.vdi); err != nil {
+			log.Printf("Unable to destroy the Packer disk: %s", err.Error())
 		}
 	}
 }

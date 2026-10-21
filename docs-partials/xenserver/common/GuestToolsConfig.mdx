@@ -1,0 +1,73 @@
+<!-- Hand-written shared partial: guest tools, included by every XenServer builder page. -->
+
+Installing the **XenServer VM Tools** (guest agent and paravirtualized drivers) in the
+image is strongly recommended: they enable graceful shutdown, accurate reporting of the
+guest IP address, and better I/O performance. Install them during the build — from a
+provisioner, or from the unattended installation itself — so the exported artifact is
+ready to use.
+
+### Getting the installer into the guest
+
+Only the `xenserver-vm-iso` builder can attach a legacy tools ISO, through its deprecated
+`guest_tools_iso` option; the option does not exist on `xenserver-vm-clone`. Leave it
+unset — the default — and nothing is looked up or attached; set it and the named ISO is
+looked up across the whole pool, not just `iso_sr`, and the build fails if the pool holds
+no VDI with that name-label, or more than one. Either way, prefer staging the installer
+with `cd_files` or uploading it with a `file` provisioner — XenServer 8 and later ship no
+tools ISO at all.
+
+### Windows
+
+Install the **XenServer VM Tools for Windows** (management agent + I/O drivers) from a
+provisioner over the configured communicator (WinRM or SSH). Upload the MSI first, so the
+same snippet works on both builders:
+
+```hcl
+build {
+  sources = ["source.xenserver-vm-clone.windows"]
+
+  provisioner "file" {
+    source      = "tools/managementagentx64.msi"
+    destination = "C:/Windows/Temp/xstools.msi"
+  }
+
+  provisioner "powershell" {
+    inline = [
+      "Start-Process msiexec.exe -Wait -ArgumentList '/i C:\\Windows\\Temp\\xstools.msi','/quiet','/norestart'"
+    ]
+  }
+}
+```
+
+Alternatively, place the installer on removable media with `cd_files` and invoke it from
+your unattended-install script — for a Windows install that is the better option, because
+the agent is then up before Packer connects.
+
+### Linux
+
+Download the `LinuxGuestTools-*.tar.gz` bundle, upload it, and run its `install.sh`:
+
+```hcl
+build {
+  sources = ["source.xenserver-vm-clone.linux"]
+
+  provisioner "file" {
+    source      = "tools/LinuxGuestTools-9.4.0.tar.gz"
+    destination = "/tmp/LinuxGuestTools.tar.gz"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "mkdir -p /tmp/xstools && tar -xzf /tmp/LinuxGuestTools.tar.gz -C /tmp/xstools",
+      "sudo /tmp/xstools/*/install.sh -n"
+    ]
+  }
+}
+```
+
+-> **Note:** Match the tools version to the target XenServer release; use the VM
+Tools shipped with that release.
+
+-> **Note:** With `communicator = "none"` there are no provisioners, so the tools can only
+be installed from the unattended installation itself — stage the installer with `cd_files`
+and run it from the answer file.

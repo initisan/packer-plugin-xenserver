@@ -1,0 +1,32 @@
+<!-- Hand-written shared partial: build provenance, included by every XenServer builder page. -->
+
+Every VM the plugin creates is automatically stamped with build-provenance metadata in the
+VM's XAPI `other-config`. The stamp is written on each build, with no configuration and no
+way to turn it off:
+
+| Key | Value | Meaning |
+| --- | --- | --- |
+| `xs_packer_plugin` | `true` | the object was created by the XenServer Packer plugin, or cloned from one that was |
+| `xs_packer_plugin_version` | e.g. `0.9.1` | the plugin release that produced it |
+
+This gives operators a queryable marker for plugin-built images. `xe vm-list` matches
+`is-a-template=false` by default, so use `xe template-list` with the same filter to find the
+template a `format = "none"` build leaves behind:
+
+```shell-session
+$ xe vm-list other-config:xs_packer_plugin=true params=name-label,uuid
+$ xe template-list other-config:xs_packer_plugin=true params=name-label,uuid
+$ xe vm-param-get uuid=<uuid> param-name=other-config param-key=xs_packer_plugin_version
+```
+
+Notes:
+
+- The stamp is applied to the build VM. A build with `format = "none"` converts that same
+  VM into a template, so the resulting template carries the stamp too.
+- Both builders create their VM by cloning, so the new VM inherits the source's
+  `other-config`. The plugin writes the stamp after the clone, so a stale version inherited
+  from a source an older plugin release built is overwritten with the release that ran
+  this time. The source itself is never modified.
+- The two keys above are **reserved**. Your `vm_other_config` entries are preserved
+  alongside them, but a `vm_other_config` entry that uses one of the reserved key names is
+  overridden by the plugin's own value.

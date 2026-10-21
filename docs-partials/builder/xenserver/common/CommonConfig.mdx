@@ -1,0 +1,8 @@
+<!-- Code generated from the comments of the CommonConfig struct in builder/xenserver/common/common_config.go; DO NOT EDIT MANUALLY -->
+
+CommonConfig holds the options the two builders share. Each builder embeds it
+with `mapstructure:",squash"` into its own config struct and adds its own
+fields there, so every option here appears in both builders' generated HCL2
+specs -- including `iso_sr`, which only the iso builder reads.
+
+<!-- End of code generated from the comments of the CommonConfig struct in builder/xenserver/common/common_config.go; -->

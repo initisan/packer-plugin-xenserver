@@ -1,0 +1,8 @@
+| Old | New |
+| --- | --- |
+| `xenserver-iso` | `xenserver-vm-iso` |
+| `xenserver-clone` | `xenserver-vm-clone` |
+| `xenserver-xva` | Removed, with no replacement builder. It imported an existing XVA from `source_path`, which is gone with it. `xva` is still the default export `format` on both builders — it is simply no longer a builder. |
+
+A builder type appears twice in a template — in the `source` block header and in the
+build's `sources` list — and both have to change.

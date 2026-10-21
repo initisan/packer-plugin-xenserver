@@ -1,0 +1,25 @@
+<!-- Code generated from the comments of the SSHConfig struct in builder/xenserver/common/ssh_config.go; DO NOT EDIT MANUALLY -->
+
+SSHConfig carries the SDK communicator options: the builders reach the guest through
+the SDK's communicator, which accepts any guest host key -- the VM is created by this
+build and has no key to pin beforehand.
+
+One of them is the plugin's to decide rather than the template's: the communicator
+defaults to `none` here rather than the SDK's `ssh`, so a template that asks for nothing
+inside the guest is never made to supply an `ssh_username`.
+
+The address is the template's when it names one. `ssh_host` and `winrm_host` are dialled
+as given, and only an unset one falls back to the address the running VM reports; the
+ports are the SDK's to apply: `ssh_port` and `winrm_port` are dialled as given, and an
+unset one takes the SDK default (22 for SSH, 5985 for WinRM, 5986 with `winrm_use_ssl`).
+Either way the build first waits for the guest to report an address, since that wait is
+also how it knows the install has finished.
+
+The guest credentials need not be in the template at all. `ssh_username`,
+`ssh_password`, `ssh_private_key_file`, `winrm_username` and `winrm_password` each fall
+back to a `XENSERVER_`-prefixed environment variable when the template leaves them
+unset, the same contract the connection options have, and a value the template does set
+always wins over the environment. The builder documentation carries the table, under
+"Supplying guest credentials from the environment".
+
+<!-- End of code generated from the comments of the SSHConfig struct in builder/xenserver/common/ssh_config.go; -->

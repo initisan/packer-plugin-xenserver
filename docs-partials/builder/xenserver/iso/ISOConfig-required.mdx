@@ -1,0 +1,25 @@
+<!-- Code generated from the comments of the ISOConfig struct in builder/xenserver/iso/config.go; DO NOT EDIT MANUALLY -->
+
+- `clone_template` (string) - The name-label of the XenServer template to clone as the VM's starting
+  point. Required: naming the template that matches the guest OS lets
+  XenServer optimize the virtual hardware, and it decides enough about the
+  VM to be worth saying out loud. Name "Other install media" to build on
+  the generic template.
+  
+  It must name a template. A VM or a snapshot sharing the name label is not a
+  clash and is never cloned here: this builder installs onto a fresh disk, and
+  `xenserver-vm-clone` is the builder that takes a VM or a snapshot.
+  
+  The VM takes the template's `vcpus`, `cores_per_socket`, `vm_memory_gb`
+  and `disk_size_gb` unless the build sets them, so a template sized for
+  the guest OS needs no sizing options at all. None of the four has a
+  default of its own: "Other install media" carries no sizing to take, so
+  a build naming it must set `vcpus`, `vm_memory_gb` and `disk_size_gb`
+  itself or fail validation.
+  
+  The first three are inherited by `VM.clone` copying them. `disk_size_gb`
+  is read off the template instead -- its provisioning disks, or failing
+  those the disk it carries on device 0 -- because the disk installed onto
+  here is a fresh one this builder creates.
+
+<!-- End of code generated from the comments of the ISOConfig struct in builder/xenserver/iso/config.go; -->

@@ -1,0 +1,143 @@
+<!-- Hand-written shared partial: connection / credentials, included by every
+     XenServer builder page. -->
+
+The builder connects to the XenServer pool over the XenAPI (XAPI). Point it at the
+**pool coordinator** (the pool master); it discovers the other hosts through the API.
+
+- `xenserver_host` (string, **required**) - The hostname or IP address of the pool coordinator (master).
+  When run against a pool, this must be the coordinator — connecting to a supporter host
+  will fail. An `https://` prefix is accepted and optional; `http://` is rejected, because
+  the login and the session reference it returns would travel in plaintext.
+
+- `xenserver_username` (string, **required**) - The XenServer account used to authenticate to the XenAPI.
+
+- `xenserver_password` (string, **required**) - The password for `xenserver_username`.
+
+- `insecure` (bool) - When `true`, the builder does not validate the
+  XenServer TLS certificate. Defaults to `false`. Use only against hosts with
+  self-signed certificates in trusted lab environments.
+
+- `ca_cert_path` (string) - PEM-encoded certificate (or CA chain) used to validate the
+  XenServer TLS certificate. **Required when `insecure` is `false`.**
+
+### Supplying credentials from the environment
+
+Each of the five options above falls back to an environment variable when the template
+does not set it, so a build file need contain no credential at all:
+
+| Option               | Environment variable      |
+| -------------------- | ------------------------- |
+| `xenserver_host`     | `XENSERVER_HOST`          |
+| `xenserver_username` | `XENSERVER_USERNAME`      |
+| `xenserver_password` | `XENSERVER_PASSWORD`      |
+| `ca_cert_path`       | `XENSERVER_CA_CERT_PATH`  |
+| `insecure`           | `XENSERVER_INSECURE`      |
+
+A value set in the template always wins; the environment is only consulted for options
+the template leaves out. `XENSERVER_INSECURE` accepts anything Go's `strconv.ParseBool`
+does (`true`, `false`, `1`, `0`, `t`, `f`, …) and any other non-empty value is an error
+rather than a guess — a typo must not silently turn certificate verification off. Setting
+the variable to the empty string counts as not setting it at all. An explicit
+`insecure = false` in the template is a decision to verify, and the environment cannot
+reverse it.
+
+The same applies to `ca_cert_path`: a template that pins a certificate has said it wants
+this pool verified, so `XENSERVER_INSECURE=true` is reported as ignored rather than
+applied. Set `insecure = true` in the template to skip verification.
+
+That protection covers only a certificate named in the template. A certificate that
+arrived through `XENSERVER_CA_CERT_PATH` is not a decision the build file made, so with
+the template silent about `insecure` an exported `XENSERVER_INSECURE=true` alongside it
+takes effect: verification is skipped, the certificate is never read, and no warning is
+printed. If you supply the certificate from the environment, keep `XENSERVER_INSECURE`
+out of that environment.
+
+These variables are read by the plugin directly. They are an alternative to Packer's own
+`PKR_VAR_*` mechanism, not a replacement for it: `PKR_VAR_xenserver_password` sets a
+Packer *input variable* named `xenserver_password`, which only reaches the builder if the
+template assigns it to the option. Use whichever fits — `XENSERVER_*` when you want the
+template to say nothing about credentials at all, `PKR_VAR_*` when you already declare
+input variables and want `sensitive = true` scrubbing on values that appear in Packer's
+own output.
+
+~> **Do not hardcode credentials.** Never commit passwords or certificates to a
+`.pkr.hcl` or `.pkrvars.hcl` file. If you do declare them as Packer input variables, mark
+the password `sensitive = true`.
+
+The credentials for the *guest* work the same way and have their own five variables —
+`XENSERVER_SSH_USERNAME`, `XENSERVER_SSH_PASSWORD`, `XENSERVER_SSH_PRIVATE_KEY_FILE`,
+`XENSERVER_WINRM_USERNAME` and `XENSERVER_WINRM_PASSWORD`. They are described under
+Communicator Configuration.
+
+### Trusting the pool's certificate
+
+`ca_cert_path` is the build's only trust root: it replaces the machine's own trust store
+rather than adding to it, and with `insecure` false the build refuses to start without it.
+The option is therefore required even for a pool whose certificate was issued by a public
+CA. XenServer hosts ship with a self-signed certificate, so in practice the file holds the
+host's own certificate. Write it out with:
+
+```shell-session
+$ xe host-get-server-certificate host=<host-uuid> > pool-ca.pem
+```
+
+For a pool, concatenate every host's certificate into a single PEM file. This matters
+even though the builder connects only to the coordinator: an export, an upload, or the
+VM's VNC console may be served by whichever host the object currently lives on, and each
+presents its own certificate.
+
+The same certificate policy — the trust roots from `ca_cert_path`, or no verification at
+all under `insecure`, with TLS 1.2 as the floor either way — governs every connection the
+build makes to the pool: the XenAPI session, the ISO and disk uploads, the artifact
+export, and the VNC console used by `boot_command`.
+
+Two failures are worth recognising:
+
+- *certificate signed by unknown authority* — `ca_cert_path` does not contain the
+  certificate of the host that answered. For a pool, check that the bundle covers every
+  host, not just the coordinator.
+- *certificate is valid for X, not Y* — the host was reached by a name or address its
+  certificate does not cover. Use a name the certificate is issued for, or reissue the
+  certificate.
+
+-> The guest is a different matter. Packer's SSH communicator never verifies the VM's host
+key, and WinRM is plaintext unless the template sets `winrm_use_ssl` — and unverified even
+then if `winrm_insecure` is true. The VM is created by this build and has no key to pin
+beforehand. Treat the network between Packer and the VM under construction as part of
+the build's trust boundary.
+
+HCL Example (shown for `xenserver-vm-clone`; the connection options are identical on `xenserver-vm-iso`):
+
+```hcl
+variable "xenserver_host" {
+  type    = string
+}
+
+variable "xenserver_username" {
+  type    = string
+  default = "root"
+}
+
+variable "xenserver_password" {
+  type      = string
+  sensitive = true
+}
+
+source "xenserver-vm-clone" "example" {
+  xenserver_host     = var.xenserver_host
+  xenserver_username = var.xenserver_username
+  xenserver_password = var.xenserver_password
+  ca_cert_path       = "pool-ca.pem"
+  # ... other configuration ...
+}
+```
+
+Or with nothing about the connection in the template at all:
+
+```shell-session
+$ export XENSERVER_HOST=pool-coordinator.example.com
+$ export XENSERVER_USERNAME=root
+$ export XENSERVER_PASSWORD=...
+$ export XENSERVER_CA_CERT_PATH=pool-ca.pem
+$ packer build .
+```

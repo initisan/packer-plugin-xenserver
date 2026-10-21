@@ -1,3 +1,5 @@
+// Copyright (c) 2026. Citrix Systems, Inc.
+
 package common
 
 import (
@@ -19,10 +21,14 @@ type LocalArtifact struct {
 func NewArtifact(dir string) (packer.Artifact, error) {
 	files := make([]string, 0, 1)
 	visit := func(path string, info os.FileInfo, err error) error {
+		// Walk passes a nil info whenever it reports an error.
+		if err != nil {
+			return err
+		}
 		if !info.IsDir() {
 			files = append(files, path)
 		}
-		return err
+		return nil
 	}
 	if err := filepath.Walk(dir, visit); err != nil {
 		return nil, err

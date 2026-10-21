@@ -1,0 +1,5 @@
+Templates written for the earlier community plugin do not run unchanged. No old
+builder type or option name is kept as an alias, so an HCL2 template that still uses
+one fails at `packer validate` with an unknown-builder or unsupported-argument error
+rather than building something different. The one exception is the `format` value
+`xva_compressed`, still accepted as a deprecated alias of `xva` and only warned about.

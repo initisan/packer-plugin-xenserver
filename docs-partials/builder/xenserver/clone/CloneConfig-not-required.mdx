@@ -1,0 +1,51 @@
+<!-- Code generated from the comments of the CloneConfig struct in builder/xenserver/clone/config.go; DO NOT EDIT MANUALLY -->
+
+- `clone_template` (string) - The name-label of the source template to clone. Exactly one of
+  `clone_template` or `clone_vm` must be set, and the name must resolve to
+  exactly one template on the pool. A snapshot does not count as one: XAPI
+  stores it as a template, but `clone_vm` is the option that takes it.
+
+- `clone_vm` (string) - The name-label of the source VM to clone. Exactly one of `clone_template`
+  or `clone_vm` must be set, and the name must resolve to exactly one VM on
+  the pool. A snapshot counts as one.
+  
+  The VM must be halted: `VM.clone` and `VM.copy` take a halted VM only and
+  raise `VM_BAD_POWER_STATE` on anything else, suspended included -- a
+  suspended source is accepted solely on a pool whose `other_config` sets
+  `allow_clone_suspended_vm`, and there the clone arrives suspended, which
+  the build cannot start. To build from a VM that has to keep running,
+  snapshot it and name the snapshot here instead -- a snapshot clones while
+  the VM keeps running, at the cost of an image only crash-consistent as of
+  the snapshot.
+  
+  A snapshot named here may be a checkpoint, which is suspended rather than
+  halted. That is allowed, because `VM.clone` halts the clone itself -- but
+  not together with a `vm_sr` that makes the build copy rather than clone,
+  which XAPI cannot settle the power state of (`VM_IS_TEMPLATE`).
+
+- `vtpm` (\*bool) - Attach a virtual Trusted Platform Module (vTPM) to the VM. `true` requires
+  `firmware = "uefi"`, which must be set explicitly on a clone.
+  
+  That check reads the config, not the clone. A build that never starts the
+  guest -- `communicator = "none"` with no `cd_files` and no `boot_command` --
+  never writes `firmware` to the VM at all, so `true` against a BIOS source
+  leaves the image carrying a vTPM on the source's own boot mode, which
+  XenServer refuses to start: NOT_IMPLEMENTED [Booting BIOS VM with VTPMs
+  attached]. Give such a build a reason to start, or clone a source that
+  already boots UEFI.
+  
+  Omit it to keep whatever the source has, which is why this is a pointer
+  and the iso builder's `vtpm` is a plain bool: `VM.clone` copies the
+  source's vTPM and creates none otherwise, so an unset option and an
+  explicit `false` have to be told apart here. `true` adds a vTPM when the
+  source had none; `false` destroys one the clone inherited, which also
+  destroys the state sealed to it and cannot be undone.
+  
+  `false` also removes `platform:vtpm`, the key the clone copies from the
+  source and from which XenServer would create a fresh vTPM at start. So a
+  vTPM is no longer what stops `firmware = "bios"`, whether the source carries
+  it as an object, as that key, or as both. The other arm of the pre-flight
+  check still stands: a source that has already run under UEFI has its boot
+  mode settled, and `false` does nothing for that.
+
+<!-- End of code generated from the comments of the CloneConfig struct in builder/xenserver/clone/config.go; -->

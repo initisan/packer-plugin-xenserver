@@ -1,0 +1,16 @@
+<!-- Code generated from the comments of the CloneConfig struct in builder/xenserver/clone/config.go; DO NOT EDIT MANUALLY -->
+
+CloneConfig is the xenserver-vm-clone builder's configuration: the options
+shared with the iso builder, plus `clone_template`, `clone_vm` and `vtpm`.
+`clone_template` and `vtpm` have namesakes on the iso builder but do not mean
+the same thing here: `clone_template` is one of a pair with `clone_vm` rather
+than required on its own, and `vtpm` is a `*bool`, so unset, `true` and
+`false` are three distinct requests.
+
+The install-media options (`iso_url`, `iso_name`, the checksum
+fields, `guest_tools_iso`) are absent on purpose — this builder implements
+none of them, so naming one has to be a validation error rather than a silent
+no-op. `iso_sr` is the exception: it is one of the shared options, so it
+decodes here, but only the iso builder's `iso_name` lookup reads it.
+
+<!-- End of code generated from the comments of the CloneConfig struct in builder/xenserver/clone/config.go; -->

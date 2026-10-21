@@ -1,0 +1,28 @@
+<!-- Hand-written shared partial: what the builder does and does not do with
+     dom0 SSH, included by every XenServer builder page. -->
+
+The builder never logs in to the XenServer host itself. It reaches dom0 only over the
+XenAPI, and reaches the VM it is building directly over the communicator (SSH or WinRM),
+so **dom0 SSH can stay disabled** — which is how XenServer 9 ships.
+
+That was not always the case. Two things used to go through an SSH login to dom0, and
+each now goes another way:
+
+| Used to need dom0 SSH                                                    | How it works now                                        |
+| ------------------------------------------------------------------------ | ------------------------------------------------------- |
+| Discovering the address behind `{{ .HTTPIP }}`, by reading `$SSH_CLIENT` | A routing-table lookup on the machine running Packer     |
+| Running `shutdown_command` down a port forward opened on the host        | Running it inside the guest over the communicator        |
+
+Two consequences:
+
+- The build never calls `host.enable_ssh`, so it needs no privilege to do so, and the
+  options that belonged to the dom0 SSH path (`host_port_min`, `host_port_max`,
+  `ssh_skip_nat_mapping`, `host_ssh_enabled_timeout`, and the rest) are rejected as
+  unknown rather than silently ignored.
+
+- Unless `communicator = "none"`, Packer must be able to reach the VM on the network its
+  VIF is attached to. Either way, the VM must be able to reach Packer's HTTP server if the
+  install uses one. On a multi-homed
+  machine, pin the address the guest is told to call back on with `http_bind_address`
+  (or name the interface with `http_interface`) — the address that reaches the pool is
+  not always the address that reaches the guest.

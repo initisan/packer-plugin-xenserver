@@ -1,0 +1,24 @@
+<!-- Code generated from the comments of the ISOConfig struct in builder/xenserver/iso/config.go; DO NOT EDIT MANUALLY -->
+
+- `iso_name` (string) - The name-label of an ISO already present on the ISO SR (`iso_sr`).
+  Mutually exclusive with `iso_url` and `iso_urls`: an install ISO is
+  either already on `iso_sr`, or downloaded from a URL and uploaded to
+  `vm_sr` as a new VDI.
+
+- `guest_tools_iso` (string) - Deprecated: XenServer 8 and later ship no guest-tools ISO (Linux tools are
+  a LinuxGuestTools-*.tar.gz tarball, Windows tools an MSI), so there is
+  nothing to attach. Retained only for XCP-ng and legacy pools; slated for
+  removal. Empty means no tools VDI is looked up or attached.
+
+- `vtpm` (bool) - Attach a virtual Trusted Platform Module (vTPM) to the VM. Requires
+  `firmware = "uefi"`, which must be set explicitly: the check runs before
+  any XenAPI session exists, so a UEFI `clone_template` does not satisfy
+  it. Defaults to false.
+  
+  `false` means "add none", not "have none": `VM.clone` copies the vTPM of
+  whatever `clone_template` names, and this builder leaves an inherited one
+  alone. To build without a vTPM, name a `clone_template` that has neither
+  a vTPM nor `platform:vtpm = "true"`: that key is copied by the clone,
+  and XenServer creates a fresh vTPM from it at start.
+
+<!-- End of code generated from the comments of the ISOConfig struct in builder/xenserver/iso/config.go; -->

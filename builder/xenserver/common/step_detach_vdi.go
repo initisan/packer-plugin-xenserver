@@ -1,3 +1,5 @@
+// Copyright (c) 2026. Citrix Systems, Inc.
+
 package common
 
 import (
@@ -42,8 +44,11 @@ func (self *StepDetachVdi) Run(ctx context.Context, state multistep.StateBag) mu
 
 	err = DisconnectVdi(c, instance, vdi)
 	if err != nil {
-		ui.Error(fmt.Sprintf("Unable to detach VDI '%s': %s", vdiUuid, err.Error()))
-		//return multistep.ActionHalt
+		// Non-fatal: the VM is shut down by now, so a stuck VBD is not worth discarding a
+		// finished build. Still an error, since the snapshot and the export then carry the
+		// CD the docs say they do not.
+		ui.Error(fmt.Sprintf("Unable to detach VDI '%s': %s. The snapshot and export will keep it attached",
+			vdiUuid, err.Error()))
 		return multistep.ActionContinue
 	}
 

@@ -1,0 +1,10 @@
+| Removed | Use instead |
+| ------- | ----------- |
+| `convert_to_template` | `format = "none"`, together with `keep_vm = "on_success"` (or `"always"`) — on its own it is rejected against the default `keep_vm = "never"`, which would destroy the template. Note it also turns the export off, which `convert_to_template` did not. |
+| `floppy_files` | `cd_files` |
+| `ssh_key_path` | `ssh_private_key_file`, the Packer SDK's own option |
+| `vcpus_max`, `vcpus_atstartup` (the community plugin's generated HCL2 surface spelled these `vcp_us_max` and `vcp_us_at_startup`) | `vcpus`, which sets both the maximum and the startup count |
+| `iso_checksum_type` | the algorithm as a prefix on `iso_checksum`, for example `"sha256:<hash>"` |
+| `source_path` | Nothing — it belonged to the removed `xenserver-xva` builder. |
+| `export_network_names`, `ip_getter`, `platform_args`, `ssh_skip_nat_mapping` | Nothing — these are gone with no replacement. |
+| `host_port_min`, `host_port_max`, `http_port_min`, `http_port_max`, `ssh_host_port_min`, `ssh_host_port_max` | Nothing — the plugin picks its own local ports. |
